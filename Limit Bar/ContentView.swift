@@ -78,6 +78,7 @@ final class LimitStore: ObservableObject {
     }
 
     private let storageKey = "limit-bar.services.v4"
+    private var refreshTimer: Timer?
 
     init() {
         if let data = UserDefaults.standard.data(forKey: storageKey),
@@ -88,6 +89,19 @@ final class LimitStore: ObservableObject {
         } else {
             services = LimitService.allCases.map(ServiceLimit.placeholder)
         }
+
+        let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshConnected(showLoading: false, presentErrors: false)
+            }
+        }
+        timer.tolerance = 2
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
+    }
+
+    deinit {
+        refreshTimer?.invalidate()
     }
 
     var allConnected: Bool { services.allSatisfy(\.isConnected) }
@@ -111,27 +125,46 @@ final class LimitStore: ObservableObject {
     }
 
     func connect(_ service: LimitService) {
-        setState(.connecting, for: service, error: nil)
+        connect(service, showLoading: true, presentErrors: true)
+    }
+
+    private func connect(_ service: LimitService, showLoading: Bool, presentErrors: Bool) {
+        if showLoading {
+            setState(.connecting, for: service, error: nil)
+        }
 
         Task {
             do {
                 let snapshot = try await ProviderConnector.fetch(service)
                 apply(snapshot, to: service)
             } catch {
-                setState(.failed, for: service, error: error.localizedDescription)
-                ErrorAlertPresenter.show(message: error.localizedDescription)
+                if showLoading {
+                    setState(.failed, for: service, error: error.localizedDescription)
+                }
+                if presentErrors {
+                    ErrorAlertPresenter.show(message: error.localizedDescription)
+                }
             }
         }
     }
 
     func refreshConnected() {
+        refreshConnected(showLoading: true, presentErrors: true)
+    }
+
+    private func refreshConnected(showLoading: Bool, presentErrors: Bool) {
         for service in services where service.isConnected {
-            connect(service.id)
+            connect(service.id, showLoading: showLoading, presentErrors: presentErrors)
         }
     }
 
     func resetSetup() {
         services = LimitService.allCases.map(ServiceLimit.placeholder)
+    }
+
+    func disconnect(_ service: LimitService) {
+        guard let index = services.firstIndex(where: { $0.id == service }) else { return }
+        services[index] = ServiceLimit.placeholder(for: service)
     }
 
     func clearError(for service: LimitService) {
@@ -723,9 +756,7 @@ struct ConnectServiceRow: View {
                 ProgressView()
                     .controlSize(.small)
             } else if service.isConnected {
-                Label("Connected", systemImage: "checkmark.circle.fill")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.green)
+                ConnectedDisconnectControl(service: service.id)
             } else {
                 Button(service.state == .failed ? "Retry" : "Connect") {
                     store.connect(service.id)
@@ -749,6 +780,26 @@ struct ConnectServiceRow: View {
         case .connected: return "Connected"
         case .failed: return service.errorMessage ?? "Connection failed"
         }
+    }
+}
+
+struct ConnectedDisconnectControl: View {
+    @EnvironmentObject private var store: LimitStore
+    let service: LimitService
+    @State private var isHovering = false
+
+    var body: some View {
+        Button {
+            store.disconnect(service)
+        } label: {
+            Label(isHovering ? "Disconnect" : "Connected", systemImage: isHovering ? "xmark.circle.fill" : "checkmark.circle.fill")
+                .font(.callout.weight(.medium))
+                .foregroundStyle(isHovering ? .red : .green)
+                .contentTransition(.opacity)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help("Disconnect \(service.rawValue)")
     }
 }
 
@@ -1277,6 +1328,7 @@ struct SettingsWindowView: View {
 
                 Toggle("", isOn: $startsAtLogin)
                     .labelsHidden()
+                    .toggleStyle(BrandedLoginToggleStyle())
                     .onChange(of: startsAtLogin) { _, isEnabled in
                         LaunchAtLoginController.setEnabled(isEnabled)
                         startsAtLogin = LaunchAtLoginController.isEnabled
@@ -1319,6 +1371,57 @@ enum LaunchAtLoginController {
     }
 }
 
+struct BrandedLoginToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(trackFill(isOn: configuration.isOn))
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(trackBorder(isOn: configuration.isOn), lineWidth: 1)
+                    )
+
+                Circle()
+                    .fill(.white.opacity(configuration.isOn ? 0.98 : 0.92))
+                    .frame(width: 24, height: 24)
+                    .shadow(color: .black.opacity(configuration.isOn ? 0.16 : 0.08), radius: 6, y: 2)
+                    .padding(3)
+            }
+            .frame(width: 52, height: 30)
+            .animation(.spring(response: 0.25, dampingFraction: 0.82), value: configuration.isOn)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Start at login")
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
+    }
+
+    private func trackFill(isOn: Bool) -> AnyShapeStyle {
+        if isOn {
+            AnyShapeStyle(LinearGradient(
+                colors: [
+                    Color(red: 0.04, green: 0.81, blue: 0.78),
+                    Color(red: 0.75, green: 0.45, blue: 0.88)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            ))
+        } else {
+            AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+        }
+    }
+
+    private func trackBorder(isOn: Bool) -> Color {
+        if isOn {
+            return Color.white.opacity(0.2)
+        } else {
+            return Color.primary.opacity(0.08)
+        }
+    }
+}
+
 struct MenuActionRow: View {
     let title: String
     let systemImage: String
@@ -1355,9 +1458,30 @@ enum ErrorAlertPresenter {
         alert.messageText = "Connection failed"
         alert.informativeText = message
         alert.alertStyle = .warning
-        alert.icon = NSImage(named: "AppLogo")
+        alert.icon = appAlertIcon()
         alert.addButton(withTitle: "OK")
         alert.runModal()
+    }
+
+    private static func appAlertIcon() -> NSImage? {
+        guard let baseImage = NSApp.applicationIconImage ?? NSImage(named: "AppLogo") else {
+            return nil
+        }
+        let size = NSSize(width: 64, height: 64)
+        let rect = NSRect(origin: .zero, size: size)
+        let image = NSImage(size: size)
+
+        image.lockFocus()
+        defer { image.unlockFocus() }
+
+        NSColor.clear.setFill()
+        rect.fill()
+
+        let clipPath = NSBezierPath(roundedRect: rect, xRadius: 14, yRadius: 14)
+        clipPath.addClip()
+        baseImage.draw(in: rect)
+
+        return image
     }
 }
 
