@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Marketing version, for example 1.0.1
+        required: true
+      build:
+        description: Build number, for example 2
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish Sparkle release
+    runs-on: macos-26
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+      UNSIGNED_RELEASE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Publish release
+        run: scripts/publish-release.sh "${{ inputs.version }}" "${{ inputs.build }}"

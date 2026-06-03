@@ -8,6 +8,8 @@
 import SwiftUI
 import AppKit
 import Combine
+import UserNotifications
+import Sparkle
 
 @main
 struct Limit_BarApp: App {
@@ -21,17 +23,84 @@ struct Limit_BarApp: App {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private let store = LimitStore()
+    private let appUpdater = AppUpdater.shared
     private var statusController: StatusBarController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         NSApp.applicationIconImage = NSImage(named: "AppLogo")
+        UNUserNotificationCenter.current().delegate = self
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if NotificationPreferencesStore.shared.preferences.isEnabled {
+            UsageNotificationCenter.requestAuthorizationIfNeeded()
+        }
         statusController = StatusBarController(store: store)
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
+    }
+}
+
+@MainActor
+final class AppUpdater: ObservableObject {
+    static let shared = AppUpdater()
+
+    let isConfigured: Bool
+
+    private let updaterController: SPUStandardUpdaterController
+
+    private init() {
+        isConfigured = Self.hasRequiredConfiguration
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: isConfigured,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+    }
+
+    var canCheckForUpdates: Bool {
+        isConfigured && updaterController.updater.canCheckForUpdates
+    }
+
+    var statusText: String {
+        if isConfigured {
+            return "Sparkle is configured for signed appcast updates."
+        }
+        return "Update feed is not configured for this build."
+    }
+
+    func checkForUpdates() {
+        guard isConfigured else {
+            ErrorAlertPresenter.show(message: "Sparkle needs SPARKLE_FEED_URL and SPARKLE_PUBLIC_ED_KEY build settings before updates can run.")
+            return
+        }
+
+        updaterController.checkForUpdates(nil)
+    }
+
+    private static var hasRequiredConfiguration: Bool {
+        guard
+            let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String,
+            let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
+        else {
+            return false
+        }
+
+        let trimmedFeed = feed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedKey = publicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return URL(string: trimmedFeed)?.scheme != nil &&
+            !trimmedFeed.contains("$(") &&
+            !trimmedKey.isEmpty &&
+            !trimmedKey.contains("$(")
     }
 }
 
@@ -121,20 +190,18 @@ final class UsageStatusIconView: NSView {
             y: originY,
             width: barWidth,
             height: maxHeight,
-            percent: currentPercent,
-            highColor: NSColor(red: 0.04, green: 0.81, blue: 0.78, alpha: 1)
+            percent: currentPercent
         )
         drawBar(
             x: originX + barWidth + gap,
             y: originY,
             width: barWidth,
             height: maxHeight,
-            percent: weeklyPercent,
-            highColor: NSColor(red: 0.75, green: 0.45, blue: 0.88, alpha: 1)
+            percent: weeklyPercent
         )
     }
 
-    private func drawBar(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, percent: Int, highColor: NSColor) {
+    private func drawBar(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, percent: Int) {
         let railRect = NSRect(x: x, y: y, width: width, height: height)
         let rail = NSBezierPath(roundedRect: railRect, xRadius: width / 2, yRadius: width / 2)
         NSColor.labelColor.withAlphaComponent(hasConnection ? 0.22 : 0.16).setFill()
@@ -145,14 +212,14 @@ final class UsageStatusIconView: NSView {
         let fillHeight = max(height * CGFloat(percent) / 100, 3)
         let fillRect = NSRect(x: x, y: y + height - fillHeight, width: width, height: fillHeight)
         let fill = NSBezierPath(roundedRect: fillRect, xRadius: width / 2, yRadius: width / 2)
-        color(for: percent, highColor: highColor).setFill()
+        fillColor(for: percent).setFill()
         fill.fill()
     }
 
-    private func color(for percent: Int, highColor: NSColor) -> NSColor {
-        if percent < 20 { return .systemRed }
-        if percent < 45 { return .systemOrange }
-        return highColor
+    private func fillColor(for percent: Int) -> NSColor {
+        if percent < 20 { return NSColor.labelColor.withAlphaComponent(0.95) }
+        if percent < 45 { return NSColor.labelColor.withAlphaComponent(0.82) }
+        return NSColor.labelColor.withAlphaComponent(0.72)
     }
 }
 
@@ -160,6 +227,8 @@ final class UsageStatusIconView: NSView {
 final class SettingsWindowPresenter {
     static let shared = SettingsWindowPresenter()
 
+    private let compactHeight: CGFloat = 650
+    private let expandedHeight: CGFloat = 830
     private var window: NSWindow?
 
     func open(store: LimitStore) {
@@ -175,7 +244,7 @@ final class SettingsWindowPresenter {
         )
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: compactHeight),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -183,11 +252,32 @@ final class SettingsWindowPresenter {
         window.title = "Settings"
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 620, height: compactHeight)
         window.contentView = hostingView
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         self.window = window
+    }
+
+    func updateHeight(showingNotificationsDetails: Bool) {
+        guard let window else { return }
+
+        let targetHeight = showingNotificationsDetails ? expandedHeight : compactHeight
+        guard abs(window.frame.height - targetHeight) > 0.5 else { return }
+
+        DispatchQueue.main.async {
+            guard let window = self.window else { return }
+            var frame = window.frame
+            frame.origin.y += frame.height - targetHeight
+            frame.size.height = targetHeight
+
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                window.animator().setFrame(frame, display: true)
+            }
+        }
     }
 }

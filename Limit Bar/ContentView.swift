@@ -10,6 +10,7 @@ import Combine
 import Foundation
 import AppKit
 import ServiceManagement
+import UserNotifications
 
 struct ServiceLimit: Identifiable, Codable, Equatable {
     let id: LimitService
@@ -52,7 +53,13 @@ enum LimitService: String, CaseIterable, Codable, Identifiable {
     case claude = "Claude Code"
     case gemini = "Gemini"
 
+    static let activeCases: [LimitService] = [.codex, .claude]
+
     var id: String { rawValue }
+
+    var isActiveProvider: Bool {
+        Self.activeCases.contains(self)
+    }
 
     var assetName: String {
         switch self {
@@ -71,6 +78,177 @@ enum LimitService: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+struct NotificationPreferences: Codable, Equatable {
+    var isEnabled: Bool
+    var thresholds: [Int]
+
+    static let `default` = NotificationPreferences(isEnabled: false, thresholds: [50, 25, 10])
+
+    var normalizedThresholds: [Int] {
+        thresholds
+            .map { min(max($0, 1), 99) }
+            .sorted(by: >)
+            .reduce(into: [Int]()) { partialResult, value in
+                if !partialResult.contains(value) {
+                    partialResult.append(value)
+                }
+            }
+    }
+}
+
+@MainActor
+final class NotificationPreferencesStore: ObservableObject {
+    static let shared = NotificationPreferencesStore()
+
+    @Published var preferences: NotificationPreferences {
+        didSet { save() }
+    }
+
+    private let storageKey = "limit-bar.notification-preferences.v1"
+
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode(NotificationPreferences.self, from: data) {
+            preferences = decoded
+        } else {
+            preferences = .default
+        }
+    }
+
+    var isEnabled: Bool {
+        get { preferences.isEnabled }
+        set { preferences.isEnabled = newValue }
+    }
+
+    var thresholds: [Int] {
+        get { preferences.thresholds }
+        set { preferences.thresholds = newValue }
+    }
+
+    func thresholdBinding(at index: Int) -> Binding<Int> {
+        Binding(
+            get: {
+                guard self.preferences.thresholds.indices.contains(index) else { return NotificationPreferences.default.thresholds[index] }
+                return self.preferences.thresholds[index]
+            },
+            set: { newValue in
+                var updated = self.preferences.thresholds
+                while updated.count <= index {
+                    updated.append(NotificationPreferences.default.thresholds[min(index, NotificationPreferences.default.thresholds.count - 1)])
+                }
+                updated[index] = min(max(newValue, 1), 99)
+                self.preferences.thresholds = updated
+            }
+        )
+    }
+
+    func restoreDefaults() {
+        preferences = .default
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(preferences) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+}
+
+enum UsageNotificationCenter {
+    private static let sentThresholdsKey = "limit-bar.sent-threshold-notifications.v1"
+
+    static func requestAuthorizationIfNeeded() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
+    }
+
+    static func sendTestNotification() {
+        requestAuthorizationIfNeeded()
+
+        let content = UNMutableNotificationContent()
+        content.title = "Codex current is low"
+        content.body = "24% remaining, below your 25% threshold. Resets in 4 hours."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "limit-bar.test-notification",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    @MainActor
+    static func notifyIfNeeded(
+        service: LimitService,
+        previous: ServiceLimit?,
+        current: ServiceLimit,
+        preferences: NotificationPreferences
+    ) {
+        guard preferences.isEnabled else { return }
+        requestAuthorizationIfNeeded()
+
+        evaluate(kind: "Current", service: service, previous: previous?.current, current: current.current, thresholds: preferences.normalizedThresholds)
+        evaluate(kind: "Weekly", service: service, previous: previous?.weekly, current: current.weekly, thresholds: preferences.normalizedThresholds)
+    }
+
+    @MainActor
+    private static func evaluate(
+        kind: String,
+        service: LimitService,
+        previous: LimitBalance?,
+        current: LimitBalance?,
+        thresholds: [Int]
+    ) {
+        guard let current else { return }
+
+        for threshold in thresholds where current.remainingPercent <= threshold {
+            let token = notificationToken(service: service, kind: kind, threshold: threshold, resetAt: current.resetsAt)
+            if sentThresholdTokens().contains(token) {
+                continue
+            }
+
+            let crossedThreshold = previous == nil || previous!.resetsAt != current.resetsAt || previous!.remainingPercent > threshold
+            guard crossedThreshold else { continue }
+
+            deliverNotification(service: service, kind: kind, threshold: threshold, current: current)
+            markSent(token: token)
+        }
+    }
+
+    @MainActor
+    private static func deliverNotification(service: LimitService, kind: String, threshold: Int, current: LimitBalance) {
+        let content = UNMutableNotificationContent()
+        content.title = "\(service.shortName) \(kind.lowercased()) is low"
+        content.body = "\(current.remainingPercent)% remaining, below your \(threshold)% threshold. \(resetText(for: current.resetsAt))"
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: notificationToken(service: service, kind: kind, threshold: threshold, resetAt: current.resetsAt),
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private static func resetText(for date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return "Resets \(formatter.localizedString(for: date, relativeTo: Date()))."
+    }
+
+    private static func notificationToken(service: LimitService, kind: String, threshold: Int, resetAt: Date) -> String {
+        "\(service.rawValue)|\(kind)|\(threshold)|\(Int(resetAt.timeIntervalSince1970))"
+    }
+
+    private static func sentThresholdTokens() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: sentThresholdsKey) ?? [])
+    }
+
+    private static func markSent(token: String) {
+        var tokens = sentThresholdTokens()
+        tokens.insert(token)
+        UserDefaults.standard.set(Array(tokens), forKey: sentThresholdsKey)
+    }
+}
+
 @MainActor
 final class LimitStore: ObservableObject {
     @Published var services: [ServiceLimit] {
@@ -78,6 +256,7 @@ final class LimitStore: ObservableObject {
     }
 
     private let storageKey = "limit-bar.services.v4"
+    private let refreshInterval: TimeInterval = 180
     private var refreshTimer: Timer?
 
     init() {
@@ -90,12 +269,12 @@ final class LimitStore: ObservableObject {
             services = LimitService.allCases.map(ServiceLimit.placeholder)
         }
 
-        let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshConnected(showLoading: false, presentErrors: false)
             }
         }
-        timer.tolerance = 2
+        timer.tolerance = 20
         RunLoop.main.add(timer, forMode: .common)
         refreshTimer = timer
     }
@@ -104,11 +283,15 @@ final class LimitStore: ObservableObject {
         refreshTimer?.invalidate()
     }
 
-    var allConnected: Bool { services.allSatisfy(\.isConnected) }
-    var connectedCount: Int { services.filter(\.isConnected).count }
+    var activeServices: [ServiceLimit] {
+        services.filter { $0.id.isActiveProvider }
+    }
+
+    var allConnected: Bool { activeServices.allSatisfy(\.isConnected) }
+    var connectedCount: Int { activeServices.filter(\.isConnected).count }
 
     var lowestRemaining: Int? {
-        services
+        activeServices
             .filter(\.isConnected)
             .flatMap { [$0.current?.remainingPercent, $0.weekly?.remainingPercent] }
             .compactMap { $0 }
@@ -116,7 +299,7 @@ final class LimitStore: ObservableObject {
     }
 
     var nextReset: Date? {
-        services
+        activeServices
             .filter(\.isConnected)
             .flatMap { [$0.current?.resetsAt, $0.weekly?.resetsAt] }
             .compactMap { $0 }
@@ -153,7 +336,7 @@ final class LimitStore: ObservableObject {
     }
 
     private func refreshConnected(showLoading: Bool, presentErrors: Bool) {
-        for service in services where service.isConnected {
+        for service in activeServices where service.isConnected {
             connect(service.id, showLoading: showLoading, presentErrors: presentErrors)
         }
     }
@@ -175,6 +358,7 @@ final class LimitStore: ObservableObject {
 
     private func apply(_ snapshot: ProviderSnapshot, to service: LimitService) {
         guard let index = services.firstIndex(where: { $0.id == service }) else { return }
+        let previous = services[index]
         services[index].state = .connected
         services[index].current = snapshot.current
         services[index].weekly = snapshot.weekly
@@ -183,6 +367,12 @@ final class LimitStore: ObservableObject {
         services[index].planName = snapshot.planName
         services[index].lastUpdated = Date()
         services[index].errorMessage = nil
+        UsageNotificationCenter.notifyIfNeeded(
+            service: service,
+            previous: previous,
+            current: services[index],
+            preferences: NotificationPreferencesStore.shared.preferences
+        )
     }
 
     private func setState(_ state: ConnectionState, for service: LimitService, error: String?) {
@@ -196,8 +386,6 @@ final class LimitStore: ObservableObject {
             services[index].accountEmail = nil
             services[index].planName = nil
         }
-
-        if state == .failed { clearError(for: service) }
     }
 
     private func save() {
@@ -394,7 +582,7 @@ struct ClaudeCLIConnector {
             )
         }
 
-        throw ConnectorError.message("Could not parse Claude Code usage. Open Claude Code and run `/usage`; if it shows balances there, retry here.")
+        throw ConnectorError.message("Claude Code did not expose subscription usage. `/usage` usually requires a Claude Code paid subscription; API-key usage is not available in this connector yet.")
     }
 
     private static func normalizeClaudePercent(_ value: Int, _ text: String) -> Int {
@@ -408,28 +596,8 @@ struct ClaudeCLIConnector {
 
 struct GeminiCLIConnector {
     static func fetch() async throws -> ProviderSnapshot {
-        let binary = try await resolveBinary()
-        let result = try await ProcessRunner.run(
-            executable: "/usr/bin/env",
-            arguments: [binary, "auth", "status"],
-            input: nil,
-            timeout: 8
-        )
-
-        let authOutput = [result.stdout, result.stderr].joined(separator: "\n")
-        if result.status != 0 || authOutput.localizedCaseInsensitiveContains("not logged") || authOutput.localizedCaseInsensitiveContains("login") {
-            throw ConnectorError.message("Gemini CLI is not authenticated. Sign in with the Gemini CLI, then retry.")
-        }
-
-        let usage = try await ProcessRunner.run(
-            executable: "/usr/bin/env",
-            arguments: [binary, "usage"],
-            input: nil,
-            timeout: 10
-        )
-
-        let output = [usage.stdout, usage.stderr].joined(separator: "\n")
-        return try parseUsage(output)
+        _ = try await resolveBinary()
+        throw ConnectorError.message("Gemini CLI does not expose quota through a headless usage command. Open Gemini CLI and use `/stats model`; Limit Bar can track Gemini after we add interactive stats capture or Google Cloud/API usage integration.")
     }
 
     private static func resolveBinary() async throws -> String {
@@ -468,11 +636,39 @@ struct GeminiCLIConnector {
         )
     }
 
+    private static func isUnauthenticated(_ output: String) -> Bool {
+        let clean = output.strippingANSI().lowercased()
+        return clean.contains("not authenticated") ||
+            clean.contains("not logged in") ||
+            clean.contains("not logged") ||
+            clean.contains("please login") ||
+            clean.contains("please log in") ||
+            clean.contains("run `gemini auth login`") ||
+            clean.contains("run gemini auth login") ||
+            clean.contains("unauthorized") ||
+            clean.contains("401")
+    }
+
+    private static func isRateLimited(_ output: String) -> Bool {
+        let clean = output.strippingANSI().lowercased()
+        return clean.contains("rate limit") ||
+            clean.contains("ratelimit") ||
+            clean.contains("resource has been exhausted") ||
+            clean.contains("quota") ||
+            clean.contains("status 429") ||
+            clean.contains("too many requests") ||
+            clean.contains("ratelimitexceeded")
+    }
+
     private static func normalizePercent(_ value: Int, _ text: String) -> Int {
         if text.localizedCaseInsensitiveContains("% used") {
             return clampPercent(100 - value)
         }
         return value
+    }
+
+    private static var trustedWorkspaceEnvironment: [String: String] {
+        ["GEMINI_CLI_TRUST_WORKSPACE": "true"]
     }
 }
 
@@ -483,7 +679,13 @@ struct ProcessRunner {
         let status: Int32
     }
 
-    static func run(executable: String, arguments: [String], input: String?, timeout: TimeInterval) async throws -> Result {
+    static func run(
+        executable: String,
+        arguments: [String],
+        input: String?,
+        timeout: TimeInterval,
+        environmentOverrides: [String: String] = [:]
+    ) async throws -> Result {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let stdoutPipe = Pipe()
@@ -496,7 +698,7 @@ struct ProcessRunner {
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
             if input != nil { process.standardInput = stdinPipe }
-            process.environment = mergedEnvironment()
+            process.environment = mergedEnvironment(overrides: environmentOverrides)
 
             @Sendable
             func finish(_ action: () throws -> Result) {
@@ -541,7 +743,7 @@ struct ProcessRunner {
         }
     }
 
-    private static func mergedEnvironment() -> [String: String] {
+    private static func mergedEnvironment(overrides: [String: String] = [:]) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let additions = [
             "/opt/homebrew/bin",
@@ -556,6 +758,9 @@ struct ProcessRunner {
         ]
         let existing = env["PATH"] ?? ""
         env["PATH"] = (additions + [existing]).joined(separator: ":")
+        for (key, value) in overrides {
+            env[key] = value
+        }
         return env
     }
 }
@@ -683,7 +888,7 @@ struct HeaderView: View {
                 if let nextReset = store.nextReset { ResetBadge(date: nextReset) }
                 BalanceBadge(percent: lowestRemaining)
             } else {
-                Text("\(store.connectedCount)/2 connected")
+                Text("\(store.connectedCount)/\(LimitService.activeCases.count) connected")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
@@ -712,7 +917,7 @@ struct OnboardingView: View {
                 }
 
                 VStack(spacing: 12) {
-                    ForEach(store.services) { service in
+                    ForEach(store.activeServices) { service in
                         ConnectServiceRow(service: service)
                     }
                 }
@@ -753,15 +958,11 @@ struct ConnectServiceRow: View {
             Spacer()
 
             if service.isConnecting {
-                ProgressView()
-                    .controlSize(.small)
+                ConnectingActionPill(compact: false)
             } else if service.isConnected {
-                ConnectedDisconnectControl(service: service.id)
+                ServiceActionPill(service: service.id, isConnected: true, compact: false)
             } else {
-                Button(service.state == .failed ? "Retry" : "Connect") {
-                    store.connect(service.id)
-                }
-                .buttonStyle(.borderedProminent)
+                ServiceActionPill(service: service.id, isConnected: false, compact: false, disconnectedTitle: service.state == .failed ? "Retry" : "Connect")
             }
         }
         .padding(.horizontal, 16)
@@ -783,23 +984,163 @@ struct ConnectServiceRow: View {
     }
 }
 
-struct ConnectedDisconnectControl: View {
+struct ServiceActionPill: View {
     @EnvironmentObject private var store: LimitStore
     let service: LimitService
+    let isConnected: Bool
+    var compact: Bool
+    var disconnectedTitle = "Connect"
     @State private var isHovering = false
 
     var body: some View {
         Button {
-            store.disconnect(service)
+            if isConnected {
+                store.disconnect(service)
+            } else {
+                store.connect(service)
+            }
         } label: {
-            Label(isHovering ? "Disconnect" : "Connected", systemImage: isHovering ? "xmark.circle.fill" : "checkmark.circle.fill")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(isHovering ? .red : .green)
-                .contentTransition(.opacity)
+            HStack(spacing: compact ? 5 : 6) {
+                Image(systemName: iconName)
+                    .font(.system(size: compact ? 11 : 12, weight: .semibold))
+                Text(title)
+                    .font(compact ? .caption.weight(.semibold) : .callout.weight(.semibold))
+                    .contentTransition(.opacity)
+            }
+            .foregroundStyle(foregroundColor)
+            .frame(width: compact ? 98 : 116, height: compact ? 28 : 30)
+            .background(backgroundFill, in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(borderColor, lineWidth: 1)
+            )
+            .shadow(color: shadowColor, radius: isConnected ? 8 : 5, y: 2)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .help("Disconnect \(service.rawValue)")
+        .help(helpText)
+    }
+
+    private var title: String {
+        if isConnected && isHovering {
+            return "Disconnect"
+        }
+        if isConnected {
+            return "Connected"
+        }
+        return disconnectedTitle
+    }
+
+    private var iconName: String {
+        if isConnected && isHovering {
+            return "xmark"
+        }
+        if isConnected {
+            return "checkmark"
+        }
+        return disconnectedTitle == "Retry" ? "arrow.clockwise" : "link"
+    }
+
+    private var foregroundColor: Color {
+        if isConnected {
+            return Color.white.opacity(0.95)
+        }
+        return disconnectedTitle == "Connect"
+            ? Color.white.opacity(0.95)
+            : Color.primary.opacity(0.9)
+    }
+
+    private var backgroundFill: AnyShapeStyle {
+        if isConnected {
+            if isHovering {
+                return AnyShapeStyle(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.88, green: 0.45, blue: 0.47),
+                            Color(red: 0.67, green: 0.19, blue: 0.23),
+                            Color(red: 0.41, green: 0.11, blue: 0.15)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+            }
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.55, green: 0.88, blue: 0.63),
+                        Color(red: 0.28, green: 0.67, blue: 0.39),
+                        Color(red: 0.14, green: 0.40, blue: 0.24)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+        if disconnectedTitle == "Connect" {
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.54, green: 0.78, blue: 1.00),
+                        Color(red: 0.23, green: 0.57, blue: 0.98),
+                        Color(red: 0.05, green: 0.37, blue: 0.88)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+        return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var borderColor: Color {
+        if isConnected {
+            return Color.white.opacity(isHovering ? 0.24 : 0.22)
+        }
+        if disconnectedTitle == "Connect" {
+            return Color.white.opacity(0.18)
+        }
+        return Color.primary.opacity(0.08)
+    }
+
+    private var shadowColor: Color {
+        if isConnected {
+            if isHovering {
+                return Color(red: 0.55, green: 0.18, blue: 0.20).opacity(0.30)
+            }
+            return Color(red: 0.18, green: 0.62, blue: 0.34).opacity(0.28)
+        }
+        if disconnectedTitle == "Connect" {
+            return Color(red: 0.12, green: 0.38, blue: 0.84).opacity(0.24)
+        }
+        return .black.opacity(0.06)
+    }
+
+    private var helpText: String {
+        if isConnected {
+            return "Disconnect \(service.rawValue)"
+        }
+        return "Connect \(service.rawValue)"
+    }
+}
+
+struct ConnectingActionPill: View {
+    var compact = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Reading")
+                .font(compact ? .caption.weight(.semibold) : .callout.weight(.semibold))
+        }
+        .foregroundStyle(.secondary)
+        .frame(width: compact ? 98 : 116, height: compact ? 28 : 30)
+        .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
     }
 }
 
@@ -852,14 +1193,14 @@ struct DashboardView: View {
             }
 
             VStack(spacing: 12) {
-                ForEach(store.services.filter(\.isConnected)) { service in
+                ForEach(store.activeServices.filter(\.isConnected)) { service in
                     ServiceBalanceCard(service: service)
                 }
             }
 
-            if store.connectedCount < LimitService.allCases.count {
+            if store.connectedCount < LimitService.activeCases.count {
                 VStack(spacing: 10) {
-                    ForEach(store.services.filter { !$0.isConnected }) { service in
+                    ForEach(store.activeServices.filter { !$0.isConnected }) { service in
                         ConnectServiceRow(service: service)
                     }
                 }
@@ -974,6 +1315,10 @@ struct BalanceMetric: View {
     let kind: String
     let balance: LimitBalance?
 
+    private var style: UsageAccentStyle {
+        kind.localizedCaseInsensitiveContains("weekly") ? .weekly : .current
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline) {
@@ -983,10 +1328,14 @@ struct BalanceMetric: View {
                         .foregroundStyle(.secondary)
                     Text(kind)
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(kindColor)
+                        .foregroundStyle(style.textColor)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                        .background(kindColor.opacity(0.18), in: Capsule())
+                        .background(style.chipFill, in: Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(style.chipBorder, lineWidth: 1)
+                        )
                 }
                 Spacer()
             }
@@ -1000,8 +1349,8 @@ struct BalanceMetric: View {
                     .foregroundStyle(.secondary)
             }
 
-            LimitProgressBar(percent: balance?.remainingPercent ?? 0, fillColor: kindColor)
-                .frame(height: 8)
+            LimitProgressBar(percent: balance?.remainingPercent ?? 0, style: style)
+                .frame(height: 12)
 
             Text(resetText)
                 .font(.callout.weight(.medium))
@@ -1038,34 +1387,49 @@ struct BalanceMetric: View {
         return .secondary
     }
 
-    private var kindColor: Color {
-        kind.localizedCaseInsensitiveContains("weekly")
-            ? Color(red: 0.75, green: 0.45, blue: 0.88)
-            : Color(red: 0.04, green: 0.81, blue: 0.78)
-    }
 }
 
 struct LimitProgressBar: View {
     let percent: Int
-    let fillColor: Color
+    let style: UsageAccentStyle
 
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(.quaternary)
+                    .fill(trackFill)
+                    .overlay(
+                        Capsule()
+                            .stroke(trackBorder, lineWidth: 1)
+                    )
 
                 Capsule()
-                    .fill(progressColor)
-                    .frame(width: max(proxy.size.width * CGFloat(percent) / 100, percent > 0 ? 7 : 0))
+                    .fill(style.fill)
+                    .frame(width: max(proxy.size.width * CGFloat(percent) / 100, percent > 0 ? 10 : 0))
+                    .overlay(
+                        Capsule()
+                            .stroke(style.highlightBorder, lineWidth: 1)
+                    )
+                    .shadow(color: style.shadowColor, radius: 8, y: 3)
             }
         }
     }
 
-    private var progressColor: Color {
-        if percent < 20 { return .red }
-        if percent < 45 { return .orange }
-        return fillColor
+    private var trackFill: AnyShapeStyle {
+        AnyShapeStyle(
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.05),
+                    Color.black.opacity(0.18)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+    }
+
+    private var trackBorder: Color {
+        Color.white.opacity(0.08)
     }
 }
 
@@ -1089,14 +1453,14 @@ struct MenuBarProgressIcon: View {
     @EnvironmentObject private var store: LimitStore
 
     private var currentPercent: Int {
-        store.services
+        store.activeServices
             .filter(\.isConnected)
             .compactMap { $0.current?.remainingPercent }
             .min() ?? 0
     }
 
     private var weeklyPercent: Int {
-        store.services
+        store.activeServices
             .filter(\.isConnected)
             .compactMap { $0.weekly?.remainingPercent }
             .min() ?? 0
@@ -1165,7 +1529,7 @@ struct MenuSetupView: View {
             }
 
             VStack(spacing: 10) {
-                ForEach(store.services) { service in
+                ForEach(store.activeServices) { service in
                     MenuConnectRow(service: service)
                 }
             }
@@ -1200,22 +1564,7 @@ struct MenuUsageView: View {
                 .buttonStyle(.plain)
             }
 
-            if let nextReset = store.nextReset {
-                HStack(spacing: 8) {
-                    Image(systemName: "clock")
-                    Text("Next reset")
-                    Spacer()
-                    Text(relativeResetText(for: nextReset))
-                        .monospacedDigit()
-                }
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 9)
-                .background(.background.opacity(0.45), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
-
-            ForEach(store.services.filter(\.isConnected)) { service in
+            ForEach(store.activeServices.filter(\.isConnected)) { service in
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         ServiceIcon(service: service.id, size: 22)
@@ -1232,12 +1581,6 @@ struct MenuUsageView: View {
             }
 
         }
-    }
-
-    private func relativeResetText(for date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 
@@ -1262,17 +1605,11 @@ struct MenuConnectRow: View {
             Spacer()
 
             if service.isConnecting {
-                ProgressView()
-                    .controlSize(.small)
+                ConnectingActionPill(compact: true)
             } else if service.isConnected {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                ServiceActionPill(service: service.id, isConnected: true, compact: true)
             } else {
-                Button(service.state == .failed ? "Retry" : "Connect") {
-                    store.connect(service.id)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                ServiceActionPill(service: service.id, isConnected: false, compact: true, disconnectedTitle: service.state == .failed ? "Retry" : "Connect")
             }
         }
         .padding(.horizontal, compact ? 10 : 12)
@@ -1296,32 +1633,50 @@ struct MenuConnectRow: View {
 
 struct SettingsWindowView: View {
     @EnvironmentObject private var store: LimitStore
+    @StateObject private var notificationSettings = NotificationPreferencesStore.shared
+    @StateObject private var appUpdater = AppUpdater.shared
     @State private var startsAtLogin = LaunchAtLoginController.isEnabled
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("Settings")
+                Text("Limit Bar Settings")
                     .font(.system(size: 28, weight: .semibold, design: .rounded))
                 Text("Connect local providers used by AI Usage Limits.")
                     .foregroundStyle(.secondary)
             }
 
             VStack(spacing: 12) {
-                ForEach(store.services) { service in
+                ForEach(store.activeServices) { service in
                     ConnectServiceRow(service: service)
                 }
             }
 
             Divider()
 
-            HStack {
+            HStack(spacing: 12) {
+                Image(systemName: "power.circle.fill")
+                    .font(.system(size: 42))
+                    .frame(width: 42, height: 42)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.54, green: 0.78, blue: 1.00),
+                                Color(red: 0.23, green: 0.57, blue: 0.98),
+                                Color(red: 0.05, green: 0.37, blue: 0.88)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Start at login")
-                        .font(.callout.weight(.semibold))
+                        .font(.headline)
                     Text("Launch Limit Bar automatically when you sign in.")
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
 
                 Spacer()
@@ -1341,11 +1696,148 @@ struct SettingsWindowView: View {
                     .stroke(.separator.opacity(0.32), lineWidth: 1)
             )
 
+            notificationCard
+
+            updatesCard
+
             Spacer(minLength: 0)
         }
         .padding(28)
-        .frame(width: 620, height: 460, alignment: .topLeading)
+        .frame(width: 620, alignment: .topLeading)
         .background(AppSurfaceBackground())
+        .onAppear {
+            SettingsWindowPresenter.shared.updateHeight(showingNotificationsDetails: notificationSettings.isEnabled)
+        }
+        .onChange(of: notificationSettings.isEnabled) { _, isEnabled in
+            SettingsWindowPresenter.shared.updateHeight(showingNotificationsDetails: isEnabled)
+        }
+    }
+
+    private var notificationCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: "bell.badge.fill")
+                    .font(.system(size: 42))
+                    .frame(width: 42, height: 42)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.54, green: 0.78, blue: 1.00),
+                                Color(red: 0.23, green: 0.57, blue: 0.98),
+                                Color(red: 0.05, green: 0.37, blue: 0.88)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Usage notifications")
+                        .font(.headline)
+                    Text("Get notified when remaining usage drops below your thresholds.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer()
+
+                Toggle("", isOn: notificationEnabledBinding)
+                    .labelsHidden()
+                    .toggleStyle(BrandedLoginToggleStyle())
+            }
+
+            if notificationSettings.isEnabled {
+                Divider()
+
+                HStack {
+                    Text("Thresholds")
+                        .font(.callout.weight(.semibold))
+                    Spacer()
+                    Button("Test Notification") {
+                        UsageNotificationCenter.sendTestNotification()
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    Button("Defaults") {
+                        notificationSettings.restoreDefaults()
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 10) {
+                    ThresholdEditorCard(title: "Early", value: notificationSettings.thresholdBinding(at: 0), style: .current)
+                    ThresholdEditorCard(title: "Warn", value: notificationSettings.thresholdBinding(at: 1), style: .weekly)
+                    ThresholdEditorCard(title: "Critical", value: notificationSettings.thresholdBinding(at: 2), style: .warning)
+                }
+
+                Text("Defaults are 50%, 25%, and 10%. Notifications apply to current and weekly balances for all connected providers.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.separator.opacity(0.32), lineWidth: 1)
+        )
+    }
+
+    private var updatesCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                .font(.system(size: 42))
+                .frame(width: 42, height: 42)
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.84, green: 0.76, blue: 0.99),
+                            Color(red: 0.68, green: 0.54, blue: 0.95),
+                            Color(red: 0.41, green: 0.35, blue: 0.82)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Software updates")
+                    .font(.headline)
+                Text(appUpdater.statusText)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Button("Check Now") {
+                appUpdater.checkForUpdates()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!appUpdater.canCheckForUpdates)
+        }
+        .padding(14)
+        .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.separator.opacity(0.32), lineWidth: 1)
+        )
+    }
+
+    private var notificationEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { notificationSettings.isEnabled },
+            set: { isEnabled in
+                notificationSettings.isEnabled = isEnabled
+                if isEnabled {
+                    UsageNotificationCenter.requestAuthorizationIfNeeded()
+                }
+            }
+        )
     }
 }
 
@@ -1385,9 +1877,13 @@ struct BrandedLoginToggleStyle: ToggleStyle {
                     )
 
                 Circle()
-                    .fill(.white.opacity(configuration.isOn ? 0.98 : 0.92))
+                    .fill(knobFill(isOn: configuration.isOn))
                     .frame(width: 24, height: 24)
-                    .shadow(color: .black.opacity(configuration.isOn ? 0.16 : 0.08), radius: 6, y: 2)
+                    .overlay(
+                        Circle()
+                            .strokeBorder(Color.white.opacity(configuration.isOn ? 0.28 : 0.18), lineWidth: 0.8)
+                    )
+                    .shadow(color: .black.opacity(configuration.isOn ? 0.24 : 0.08), radius: 8, y: 2)
                     .padding(3)
             }
             .frame(width: 52, height: 30)
@@ -1402,11 +1898,12 @@ struct BrandedLoginToggleStyle: ToggleStyle {
         if isOn {
             AnyShapeStyle(LinearGradient(
                 colors: [
-                    Color(red: 0.04, green: 0.81, blue: 0.78),
-                    Color(red: 0.75, green: 0.45, blue: 0.88)
+                    Color(red: 0.54, green: 0.78, blue: 1.00),
+                    Color(red: 0.23, green: 0.57, blue: 0.98),
+                    Color(red: 0.05, green: 0.37, blue: 0.88)
                 ],
-                startPoint: .leading,
-                endPoint: .trailing
+                startPoint: .top,
+                endPoint: .bottom
             ))
         } else {
             AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
@@ -1415,10 +1912,113 @@ struct BrandedLoginToggleStyle: ToggleStyle {
 
     private func trackBorder(isOn: Bool) -> Color {
         if isOn {
-            return Color.white.opacity(0.2)
+            return Color.white.opacity(0.22)
         } else {
             return Color.primary.opacity(0.08)
         }
+    }
+
+    private func knobFill(isOn: Bool) -> AnyShapeStyle {
+        if isOn {
+            AnyShapeStyle(LinearGradient(
+                colors: [
+                    Color.white.opacity(0.98),
+                    Color(red: 0.86, green: 0.79, blue: 0.99),
+                    Color(red: 0.70, green: 0.58, blue: 0.95)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            ))
+        } else {
+            AnyShapeStyle(Color.white.opacity(0.92))
+        }
+    }
+}
+
+struct ThresholdEditorCard: View {
+    let title: String
+    @Binding var value: Int
+    let style: ThresholdEditorStyle
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Text("\(value)%")
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+
+            Stepper("", value: $value, in: 1...99, step: 5)
+                .labelsHidden()
+
+            Capsule()
+                .fill(style.fill)
+                .frame(height: 10)
+                .overlay(
+                    Capsule()
+                        .stroke(style.border, lineWidth: 1)
+                )
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(.separator.opacity(0.28), lineWidth: 1)
+        )
+    }
+}
+
+enum ThresholdEditorStyle {
+    case current
+    case weekly
+    case warning
+
+    var fill: AnyShapeStyle {
+        switch self {
+        case .current:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.54, green: 0.91, blue: 0.94),
+                        Color(red: 0.28, green: 0.77, blue: 0.85),
+                        Color(red: 0.10, green: 0.47, blue: 0.62)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        case .weekly:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.84, green: 0.76, blue: 0.99),
+                        Color(red: 0.68, green: 0.54, blue: 0.95),
+                        Color(red: 0.41, green: 0.35, blue: 0.82)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        case .warning:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.99, green: 0.72, blue: 0.54),
+                        Color(red: 0.96, green: 0.45, blue: 0.34),
+                        Color(red: 0.77, green: 0.21, blue: 0.18)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+    }
+
+    var border: Color {
+        Color.white.opacity(0.18)
     }
 }
 
@@ -1489,6 +2089,10 @@ struct CompactBalanceRow: View {
     let kind: String
     let balance: LimitBalance?
 
+    private var style: UsageAccentStyle {
+        kind.localizedCaseInsensitiveContains("weekly") ? .weekly : .current
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
@@ -1498,14 +2102,18 @@ struct CompactBalanceRow: View {
                 Spacer()
                 Text(kind)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(kindColor)
+                    .foregroundStyle(style.textColor)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(kindColor.opacity(0.18), in: Capsule())
+                    .background(style.chipFill, in: Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(style.chipBorder, lineWidth: 1)
+                    )
             }
 
-            LimitProgressBar(percent: balance?.remainingPercent ?? 0, fillColor: kindColor)
-                .frame(height: 7)
+            LimitProgressBar(percent: balance?.remainingPercent ?? 0, style: style)
+                .frame(height: 10)
 
             Text(compactResetText)
                 .font(.callout.weight(.medium))
@@ -1521,10 +2129,92 @@ struct CompactBalanceRow: View {
         return "Resets in \(relative.localizedString(for: balance.resetsAt, relativeTo: Date()))"
     }
 
-    private var kindColor: Color {
-        kind.localizedCaseInsensitiveContains("weekly")
-            ? Color(red: 0.75, green: 0.45, blue: 0.88)
-            : Color(red: 0.04, green: 0.81, blue: 0.78)
+}
+
+enum UsageAccentStyle {
+    case current
+    case weekly
+
+    var fill: AnyShapeStyle {
+        switch self {
+        case .current:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.54, green: 0.91, blue: 0.94),
+                        Color(red: 0.28, green: 0.77, blue: 0.85),
+                        Color(red: 0.10, green: 0.47, blue: 0.62)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        case .weekly:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.84, green: 0.76, blue: 0.99),
+                        Color(red: 0.68, green: 0.54, blue: 0.95),
+                        Color(red: 0.41, green: 0.35, blue: 0.82)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+    }
+
+    var chipFill: AnyShapeStyle {
+        switch self {
+        case .current:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.13, green: 0.34, blue: 0.39).opacity(0.92),
+                        Color(red: 0.08, green: 0.22, blue: 0.28).opacity(0.92)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        case .weekly:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.29, green: 0.20, blue: 0.39).opacity(0.92),
+                        Color(red: 0.18, green: 0.12, blue: 0.28).opacity(0.92)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+    }
+
+    var textColor: Color {
+        switch self {
+        case .current:
+            return Color(red: 0.26, green: 0.88, blue: 0.92)
+        case .weekly:
+            return Color(red: 0.76, green: 0.53, blue: 0.95)
+        }
+    }
+
+    var chipBorder: Color {
+        Color.white.opacity(0.10)
+    }
+
+    var highlightBorder: Color {
+        Color.white.opacity(0.22)
+    }
+
+    var shadowColor: Color {
+        switch self {
+        case .current:
+            return Color(red: 0.13, green: 0.58, blue: 0.72).opacity(0.35)
+        case .weekly:
+            return Color(red: 0.43, green: 0.31, blue: 0.78).opacity(0.35)
+        }
     }
 }
 
