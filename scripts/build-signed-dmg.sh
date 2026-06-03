@@ -37,6 +37,7 @@ ARCHIVE_PATH="$DIST_ROOT/${APP_NAME}.xcarchive"
 STAGING_DIR="$DIST_ROOT/dmg-root"
 ARTIFACTS_DIR="$DIST_ROOT/artifacts"
 VOLUME_NAME="$APP_NAME"
+APP_NOTARY_ZIP_PATH="$ARTIFACTS_DIR/Limit-Bar-${VERSION}-app-notary.zip"
 DMG_RW_PATH="$ARTIFACTS_DIR/Limit-Bar-${VERSION}-rw.dmg"
 DMG_PATH="$ARTIFACTS_DIR/Limit-Bar-${VERSION}.dmg"
 DMG_DEVICE=""
@@ -48,6 +49,35 @@ detach_dmg() {
   fi
 }
 trap detach_dmg EXIT
+
+resign_sparkle_bundle() {
+  local sparkle_base="$1"
+
+  local nested_targets=(
+    "$sparkle_base/Autoupdate"
+    "$sparkle_base/XPCServices/Downloader.xpc"
+    "$sparkle_base/XPCServices/Installer.xpc"
+    "$sparkle_base/Updater.app"
+  )
+
+  for target in "${nested_targets[@]}"; do
+    if [[ -e "$target" ]]; then
+      codesign --force \
+        --sign "$DEVELOPER_ID_APPLICATION" \
+        --timestamp \
+        --options runtime \
+        --preserve-metadata=identifier,entitlements,flags \
+        "$target"
+    fi
+  done
+
+  codesign --force \
+    --sign "$DEVELOPER_ID_APPLICATION" \
+    --timestamp \
+    --options runtime \
+    --preserve-metadata=identifier,entitlements,flags \
+    "$sparkle_base"
+}
 
 generate_dmg_background() {
   local output_path="$1"
@@ -131,9 +161,32 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 66
 fi
 
+echo "Re-signing nested Sparkle components..."
+SPARKLE_BASE="$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B"
+if [[ -d "$SPARKLE_BASE" ]]; then
+  resign_sparkle_bundle "$SPARKLE_BASE"
+  codesign --force \
+    --sign "$DEVELOPER_ID_APPLICATION" \
+    --timestamp \
+    --options runtime \
+    --preserve-metadata=identifier,entitlements,flags \
+    "$APP_PATH"
+fi
+
 echo "Verifying app signature..."
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 codesign -dvvv "$APP_PATH" 2>&1 | sed -n '/Authority=/p;/TeamIdentifier=/p;/Runtime Version=/p'
+
+if [[ "$NOTARIZE" == "1" ]]; then
+  echo "Submitting app for notarization with profile: $NOTARY_PROFILE"
+  ditto -c -k --keepParent "$APP_PATH" "$APP_NOTARY_ZIP_PATH"
+  xcrun notarytool submit "$APP_NOTARY_ZIP_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+
+  echo "Stapling app notarization ticket..."
+  xcrun stapler staple "$APP_PATH"
+  xcrun stapler validate "$APP_PATH"
+  rm -f "$APP_NOTARY_ZIP_PATH"
+fi
 
 echo "Preparing DMG contents..."
 ditto "$APP_PATH" "$STAGING_DIR/${APP_NAME}.app"
