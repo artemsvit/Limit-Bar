@@ -36,7 +36,7 @@ DIST_ROOT="$ROOT_DIR/build/distribution/v${VERSION}"
 ARCHIVE_PATH="$DIST_ROOT/${APP_NAME}.xcarchive"
 STAGING_DIR="$DIST_ROOT/dmg-root"
 ARTIFACTS_DIR="$DIST_ROOT/artifacts"
-VOLUME_NAME="${APP_NAME} ${VERSION}"
+VOLUME_NAME="$APP_NAME"
 DMG_RW_PATH="$ARTIFACTS_DIR/Limit-Bar-${VERSION}-rw.dmg"
 DMG_PATH="$ARTIFACTS_DIR/Limit-Bar-${VERSION}.dmg"
 DMG_DEVICE=""
@@ -52,22 +52,12 @@ trap detach_dmg EXIT
 generate_dmg_background() {
   local output_path="$1"
 
-  xcrun swift - "$output_path" "$VERSION" <<'SWIFT'
+  xcrun swift - "$output_path" <<'SWIFT'
 import AppKit
 
 let outputPath = CommandLine.arguments[1]
-let version = CommandLine.arguments[2]
 let size = NSSize(width: 720, height: 440)
 let image = NSImage(size: size)
-
-func roundedRect(_ rect: NSRect, radius: CGFloat, fill: NSColor, stroke: NSColor, lineWidth: CGFloat = 1) {
-    let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-    fill.setFill()
-    path.fill()
-    stroke.setStroke()
-    path.lineWidth = lineWidth
-    path.stroke()
-}
 
 func text(_ value: String, x: CGFloat, y: CGFloat, size: CGFloat, weight: NSFont.Weight, color: NSColor) {
     let attrs: [NSAttributedString.Key: Any] = [
@@ -79,35 +69,17 @@ func text(_ value: String, x: CGFloat, y: CGFloat, size: CGFloat, weight: NSFont
 
 image.lockFocus()
 
-NSColor(calibratedRed: 0.075, green: 0.078, blue: 0.082, alpha: 1).setFill()
+NSColor(calibratedRed: 0.965, green: 0.968, blue: 0.972, alpha: 1).setFill()
 NSRect(origin: .zero, size: size).fill()
 
 let gradient = NSGradient(colors: [
-    NSColor(calibratedRed: 0.105, green: 0.110, blue: 0.120, alpha: 1),
-    NSColor(calibratedRed: 0.050, green: 0.052, blue: 0.058, alpha: 1)
+    NSColor(calibratedRed: 1.000, green: 1.000, blue: 1.000, alpha: 1),
+    NSColor(calibratedRed: 0.930, green: 0.940, blue: 0.950, alpha: 1)
 ])!
 gradient.draw(in: NSRect(origin: .zero, size: size), angle: 90)
 
-NSColor(calibratedRed: 0.26, green: 0.82, blue: 0.90, alpha: 0.16).setFill()
-NSBezierPath(ovalIn: NSRect(x: -90, y: 210, width: 290, height: 290)).fill()
-NSColor(calibratedRed: 0.62, green: 0.40, blue: 0.96, alpha: 0.14).setFill()
-NSBezierPath(ovalIn: NSRect(x: 470, y: -120, width: 280, height: 280)).fill()
-
-roundedRect(
-    NSRect(x: 32, y: 32, width: 656, height: 376),
-    radius: 28,
-    fill: NSColor(calibratedWhite: 1, alpha: 0.035),
-    stroke: NSColor(calibratedWhite: 1, alpha: 0.070)
-)
-
-text("Limit Bar", x: 58, y: 345, size: 36, weight: .bold, color: NSColor(calibratedWhite: 0.94, alpha: 1))
-text("Drag to Applications", x: 60, y: 315, size: 17, weight: .semibold, color: NSColor(calibratedWhite: 0.68, alpha: 1))
-text("Version \(version)", x: 588, y: 353, size: 13, weight: .semibold, color: NSColor(calibratedWhite: 0.55, alpha: 1))
-
-let leftPanel = NSRect(x: 104, y: 115, width: 184, height: 176)
-let rightPanel = NSRect(x: 428, y: 115, width: 184, height: 176)
-roundedRect(leftPanel, radius: 22, fill: NSColor(calibratedWhite: 1, alpha: 0.040), stroke: NSColor(calibratedRed: 0.34, green: 0.85, blue: 0.92, alpha: 0.22))
-roundedRect(rightPanel, radius: 22, fill: NSColor(calibratedWhite: 1, alpha: 0.040), stroke: NSColor(calibratedRed: 0.62, green: 0.43, blue: 0.96, alpha: 0.24))
+text("Limit Bar", x: 76, y: 350, size: 34, weight: .bold, color: NSColor(calibratedWhite: 0.13, alpha: 1))
+text("Drag to Applications", x: 78, y: 318, size: 17, weight: .medium, color: NSColor(calibratedWhite: 0.42, alpha: 1))
 
 let arrow = NSBezierPath()
 arrow.move(to: NSPoint(x: 326, y: 205))
@@ -115,18 +87,11 @@ arrow.line(to: NSPoint(x: 394, y: 205))
 arrow.move(to: NSPoint(x: 381, y: 220))
 arrow.line(to: NSPoint(x: 396, y: 205))
 arrow.line(to: NSPoint(x: 381, y: 190))
-NSColor(calibratedWhite: 0.86, alpha: 0.56).setStroke()
+NSColor(calibratedWhite: 0.48, alpha: 0.65).setStroke()
 arrow.lineWidth = 4
 arrow.lineCapStyle = .round
 arrow.lineJoinStyle = .round
 arrow.stroke()
-
-NSColor(calibratedRed: 0.31, green: 0.84, blue: 0.91, alpha: 0.62).setFill()
-NSBezierPath(roundedRect: NSRect(x: 60, y: 62, width: 108, height: 5), xRadius: 3, yRadius: 3).fill()
-NSColor(calibratedRed: 0.60, green: 0.41, blue: 0.95, alpha: 0.56).setFill()
-NSBezierPath(roundedRect: NSRect(x: 174, y: 62, width: 84, height: 5), xRadius: 3, yRadius: 3).fill()
-NSColor(calibratedRed: 0.98, green: 0.37, blue: 0.28, alpha: 0.55).setFill()
-NSBezierPath(roundedRect: NSRect(x: 264, y: 62, width: 58, height: 5), xRadius: 3, yRadius: 3).fill()
 
 image.unlockFocus()
 
