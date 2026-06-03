@@ -1144,6 +1144,70 @@ struct ConnectingActionPill: View {
     }
 }
 
+struct UpdateActionPill: View {
+    let isEnabled: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("Check Now")
+                    .font(.callout.weight(.semibold))
+            }
+            .foregroundStyle(foregroundColor)
+            .frame(width: 116, height: 30)
+            .background(backgroundFill, in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(borderColor, lineWidth: 1)
+            )
+            .shadow(color: shadowColor, radius: isEnabled ? 5 : 0, y: 2)
+            .opacity(isEnabled ? 1 : 0.62)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .onHover { isHovering = $0 }
+        .help(isEnabled ? "Check for software updates" : "Software updates are not configured")
+    }
+
+    private var foregroundColor: Color {
+        isEnabled ? Color.white.opacity(0.95) : Color.secondary
+    }
+
+    private var backgroundFill: AnyShapeStyle {
+        if isEnabled {
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: isHovering ? [
+                        Color(red: 0.62, green: 0.82, blue: 1.00),
+                        Color(red: 0.32, green: 0.62, blue: 0.98),
+                        Color(red: 0.08, green: 0.42, blue: 0.90)
+                    ] : [
+                        Color(red: 0.54, green: 0.78, blue: 1.00),
+                        Color(red: 0.23, green: 0.57, blue: 0.98),
+                        Color(red: 0.05, green: 0.37, blue: 0.88)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+
+        return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var borderColor: Color {
+        isEnabled ? Color.white.opacity(0.18) : Color.primary.opacity(0.08)
+    }
+
+    private var shadowColor: Color {
+        isEnabled ? Color(red: 0.12, green: 0.38, blue: 0.84).opacity(isHovering ? 0.30 : 0.24) : .clear
+    }
+}
+
 struct SetupPromiseRow: View {
     let symbol: String
     let title: String
@@ -1814,11 +1878,9 @@ struct SettingsWindowView: View {
 
             Spacer()
 
-            Button("Check Now") {
+            UpdateActionPill(isEnabled: appUpdater.canCheckForUpdates) {
                 appUpdater.checkForUpdates()
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!appUpdater.canCheckForUpdates)
         }
         .padding(14)
         .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
