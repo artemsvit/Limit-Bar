@@ -299,7 +299,7 @@
 				MARKETING_VERSION = 1.0;
 					PRODUCT_BUNDLE_IDENTIFIER = "artsvit.apps.Limit-Bar";
 					PRODUCT_NAME = "$(TARGET_NAME)";
-					SPARKLE_FEED_URL = "https://github.com/artemsvit/Limit-Bar/releases/latest/download/appcast.xml";
+					SPARKLE_FEED_URL = "https://github.com/artemsvit/Limit-Bar/releases/download/updates/appcast.xml";
 					SPARKLE_PUBLIC_ED_KEY = "96VpvrwjTO2r7k7pmBJdFzPVvDeYPbO+uXpPqEuoXzU=";
 					STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -333,7 +333,7 @@
 				MARKETING_VERSION = 1.0;
 					PRODUCT_BUNDLE_IDENTIFIER = "artsvit.apps.Limit-Bar";
 					PRODUCT_NAME = "$(TARGET_NAME)";
-					SPARKLE_FEED_URL = "https://github.com/artemsvit/Limit-Bar/releases/latest/download/appcast.xml";
+					SPARKLE_FEED_URL = "https://github.com/artemsvit/Limit-Bar/releases/download/updates/appcast.xml";
 					SPARKLE_PUBLIC_ED_KEY = "96VpvrwjTO2r7k7pmBJdFzPVvDeYPbO+uXpPqEuoXzU=";
 					STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;

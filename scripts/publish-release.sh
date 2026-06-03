@@ -9,7 +9,8 @@ SCHEME="Limit Bar"
 PROJECT="Limit Bar.xcodeproj"
 APP_NAME="Limit Bar"
 SPARKLE_ACCOUNT="limit-bar"
-SPARKLE_FEED_URL="https://github.com/${REPO}/releases/latest/download/appcast.xml"
+FEED_TAG="updates"
+SPARKLE_FEED_URL="https://github.com/${REPO}/releases/download/${FEED_TAG}/appcast.xml"
 SPARKLE_PUBLIC_ED_KEY="96VpvrwjTO2r7k7pmBJdFzPVvDeYPbO+uXpPqEuoXzU="
 
 VERSION="${1:-}"
@@ -26,10 +27,6 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 69
 fi
 
-if [[ -z "${SPARKLE_PRIVATE_KEY:-}" ]]; then
-  Vendor/Sparkle/bin/generate_keys --account "$SPARKLE_ACCOUNT" -p >/dev/null
-fi
-
 TAG="v${VERSION}"
 RELEASE_NAME="${APP_NAME} ${VERSION}"
 ARCHIVE_ROOT="$ROOT_DIR/build/releases/${TAG}"
@@ -43,6 +40,21 @@ APPCAST_PATH="$UPDATES_DIR/appcast.xml"
 
 rm -rf "$ARCHIVE_ROOT"
 mkdir -p "$EXPORT_DIR" "$UPDATES_DIR"
+
+TEMP_PRIVATE_KEY_PATH=""
+cleanup() {
+  if [[ -n "$TEMP_PRIVATE_KEY_PATH" ]]; then
+    rm -f "$TEMP_PRIVATE_KEY_PATH"
+  fi
+}
+trap cleanup EXIT
+
+if [[ -z "${SPARKLE_PRIVATE_KEY:-}" ]]; then
+  TEMP_PRIVATE_KEY_PATH="$ARCHIVE_ROOT/sparkle-private-key"
+  rm -f "$TEMP_PRIVATE_KEY_PATH"
+  Vendor/Sparkle/bin/generate_keys --account "$SPARKLE_ACCOUNT" -x "$TEMP_PRIVATE_KEY_PATH" >/dev/null
+  SPARKLE_PRIVATE_KEY="$(<"$TEMP_PRIVATE_KEY_PATH")"
+fi
 
 if [[ "${UNSIGNED_RELEASE:-0}" == "1" ]]; then
   DERIVED_DATA="$ARCHIVE_ROOT/DerivedData"
@@ -78,28 +90,32 @@ cat > "$NOTES_PATH" <<EOF
 Release ${VERSION} (${BUILD}).
 EOF
 
-DOWNLOAD_PREFIX="https://github.com/${REPO}/releases/download/${TAG}"
+RELEASE_ASSET_PREFIX="https://github.com/${REPO}/releases/download/${TAG}/"
 
-if [[ -n "${SPARKLE_PRIVATE_KEY:-}" ]]; then
-  printf '%s' "$SPARKLE_PRIVATE_KEY" | Vendor/Sparkle/bin/generate_appcast \
-    --ed-key-file - \
-    --download-url-prefix "$DOWNLOAD_PREFIX" \
-    --maximum-versions 1 \
-    "$UPDATES_DIR"
-else
-  Vendor/Sparkle/bin/generate_appcast \
-    --account "$SPARKLE_ACCOUNT" \
-    --download-url-prefix "$DOWNLOAD_PREFIX" \
-    --maximum-versions 1 \
-    "$UPDATES_DIR"
-fi
+printf '%s' "$SPARKLE_PRIVATE_KEY" | Vendor/Sparkle/bin/generate_appcast \
+  --ed-key-file - \
+  --download-url-prefix "$RELEASE_ASSET_PREFIX" \
+  --release-notes-url-prefix "$RELEASE_ASSET_PREFIX" \
+  --maximum-versions 1 \
+  "$UPDATES_DIR"
 
 gh release create "$TAG" \
   "$ZIP_PATH" \
+  "$NOTES_PATH" \
   "$APPCAST_PATH" \
   --repo "$REPO" \
   --title "$RELEASE_NAME" \
   --notes-file "$NOTES_PATH"
+
+if ! gh release view "$FEED_TAG" --repo "$REPO" >/dev/null 2>&1; then
+  gh release create "$FEED_TAG" \
+    --repo "$REPO" \
+    --title "${APP_NAME} Update Feed" \
+    --notes "Stable Sparkle update feed." \
+    --prerelease
+fi
+
+gh release upload "$FEED_TAG" "$APPCAST_PATH" --repo "$REPO" --clobber
 
 echo "Published $RELEASE_NAME"
 echo "Sparkle feed: $SPARKLE_FEED_URL"

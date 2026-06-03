@@ -6,7 +6,7 @@ Limit Bar integrates Sparkle 2.9.2 through the official Sparkle Swift Package Ma
 
 These target build settings are configured for GitHub Releases:
 
-- `SPARKLE_FEED_URL`: `https://github.com/artemsvit/Limit-Bar/releases/latest/download/appcast.xml`
+- `SPARKLE_FEED_URL`: `https://github.com/artemsvit/Limit-Bar/releases/download/updates/appcast.xml`
 - `SPARKLE_PUBLIC_ED_KEY`: `96VpvrwjTO2r7k7pmBJdFzPVvDeYPbO+uXpPqEuoXzU=`
 
 `Config/LimitBar-Info.plist` maps them into:
