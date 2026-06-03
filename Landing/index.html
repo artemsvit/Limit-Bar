@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Limit Bar - macOS Usage Tracker for Codex and Claude Code</title>
+  <meta name="description" content="Limit Bar is a macOS menu bar app that tracks Codex and Claude Code usage, reset timers, and low-balance alerts from local CLI sessions.">
+  <meta name="theme-color" content="#080b10">
+  <meta name="robots" content="index, follow">
+  <meta name="application-name" content="Limit Bar">
+  <meta name="apple-mobile-web-app-title" content="Limit Bar">
+  <link rel="canonical" href="https://codexbar.app/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Limit Bar">
+  <meta property="og:title" content="Limit Bar - macOS Usage Tracker for Codex and Claude Code">
+  <meta property="og:description" content="Track Codex and Claude Code usage from your menu bar with reset timers and low-balance alerts.">
+  <meta property="og:url" content="https://codexbar.app/">
+  <meta property="og:image" content="https://codexbar.app/assets/app-icon.png">
+  <meta property="og:image:alt" content="Limit Bar app icon">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Limit Bar - macOS Usage Tracker for Codex and Claude Code">
+  <meta name="twitter:description" content="Track Codex and Claude Code usage from your menu bar with reset timers and low-balance alerts.">
+  <meta name="twitter:image" content="https://codexbar.app/assets/app-icon.png">
+  <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="shortcut icon" href="/favicon.ico" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <link rel="stylesheet" href="styles.css">
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "Limit Bar",
+      "applicationCategory": "UtilitiesApplication",
+      "operatingSystem": "macOS 15.6+",
+      "description": "Limit Bar is a macOS menu bar app that tracks Codex and Claude Code usage, reset timers, and low-balance alerts from local CLI sessions.",
+      "url": "https://codexbar.app/",
+      "downloadUrl": "https://github.com/artemsvit/Limit-Bar/releases/latest",
+      "image": "https://codexbar.app/assets/app-icon.png",
+      "sameAs": [
+        "https://github.com/artemsvit/Limit-Bar"
+      ],
+      "featureList": [
+        "Codex usage tracking",
+        "Claude Code usage tracking",
+        "Current and weekly reset timers",
+        "Low-balance notifications",
+        "Signed Sparkle updates"
+      ]
+    }
+  </script>
+</head>
+<body id="top">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header" aria-label="Primary">
+    <div class="site-header-inner">
+      <a class="brand" href="#top" aria-label="Limit Bar home">
+        <img src="assets/app-icon.png" alt="" class="brand-icon" width="38" height="38" fetchpriority="high">
+        <span translate="no">Limit Bar</span>
+      </a>
+      <nav class="nav-links" aria-label="Sections">
+        <a href="#features">Features</a>
+        <a href="#local">Local First</a>
+        <a href="#download">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">macOS Menu Bar Utility</p>
+        <h1>Know your AI headroom before you start.</h1>
+        <p class="hero-text">Track Codex and Claude Code usage from your menu bar with reset timers and low-balance alerts.</p>
+        <div class="hero-actions">
+          <a
+            class="primary-button"
+            href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.4/Limit-Bar-1.0.4.dmg"
+            data-release-download
+            aria-label="Download Limit Bar for macOS"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <span class="button-icon" aria-hidden="true"><i data-lucide="download"></i></span>
+            Download for macOS
+          </a>
+          <a class="secondary-link" href="#features">See How It Works</a>
+          <span class="version-note" data-release-version>Version 1.0.4 &middot; macOS 15.6+</span>
+        </div>
+      </div>
+
+      <div class="hero-visual" aria-label="Limit Bar interface preview">
+        <div class="hero-glow hero-glow-left" aria-hidden="true"></div>
+        <div class="hero-glow hero-glow-right" aria-hidden="true"></div>
+
+        <div class="mac-window app-surface">
+          <div class="window-header">
+            <strong>AI Usage Limits</strong>
+          </div>
+
+          <article class="usage-card">
+            <div class="service-row">
+              <img src="assets/codex.png" alt="" class="service-icon" width="46" height="46">
+              <strong>Codex</strong>
+            </div>
+
+            <div class="metric-row">
+              <span class="percent">71%</span>
+              <span class="chip chip-current">Current</span>
+            </div>
+            <div class="progress-track">
+              <span class="progress-fill fill-current" style="--fill: 0.71"></span>
+            </div>
+            <p>Resets in 56m</p>
+
+            <div class="metric-row metric-row-late">
+              <span class="percent">58%</span>
+              <span class="chip chip-weekly">Weekly</span>
+            </div>
+            <div class="progress-track">
+              <span class="progress-fill fill-weekly" style="--fill: 0.58"></span>
+            </div>
+            <p>Resets in 4d</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="provider-strip" aria-label="Supported providers">
+      <div>
+        <img src="assets/codex.png" alt="" width="28" height="28">
+        <span>Codex</span>
+      </div>
+      <div>
+        <img src="assets/claude-code.png" alt="" width="28" height="28">
+        <span>Claude Code</span>
+      </div>
+      <p>Uses local CLI sessions. No passwords. No browser cookies.</p>
+    </section>
+
+    <section class="section-grid" id="features">
+      <article>
+        <span class="feature-icon" aria-hidden="true"><i data-lucide="bar-chart-3"></i></span>
+        <h2>Current and Weekly View</h2>
+        <p>See both windows, remaining balance, and the next reset at a glance.</p>
+      </article>
+      <article>
+        <span class="feature-icon" aria-hidden="true"><i data-lucide="bell"></i></span>
+        <h2>Threshold Alerts</h2>
+        <p>Set your limits once and get notified before usage gets tight.</p>
+      </article>
+      <article>
+        <span class="feature-icon" aria-hidden="true"><i data-lucide="sparkles"></i></span>
+        <h2>Quiet by Default</h2>
+        <p>Runs in the menu bar, refreshes in the background, and stays out of the way.</p>
+      </article>
+    </section>
+
+    <section class="split-section" id="local">
+      <div>
+        <p class="eyebrow">Local First</p>
+        <h2>Uses the tools you already run.</h2>
+        <p>Limit Bar reads local Codex and Claude Code sessions. It does not scrape browser state or ask for extra credentials.</p>
+        <ul class="detail-list">
+          <li>Active provider status in the menu bar</li>
+          <li>Custom low-balance alerts</li>
+          <li>Signed in-app updates with Sparkle</li>
+        </ul>
+      </div>
+      <div class="settings-panel" aria-label="Settings preview">
+        <div class="settings-row">
+          <span class="settings-icon" aria-hidden="true"><i data-lucide="power"></i></span>
+          <div>
+            <strong>Start at login</strong>
+            <p>Open Limit Bar when you sign in.</p>
+          </div>
+          <span class="toggle on"></span>
+        </div>
+        <div class="settings-row">
+          <span class="settings-icon" aria-hidden="true"><i data-lucide="bell"></i></span>
+          <div>
+            <strong>Usage notifications</strong>
+            <p>Alert when remaining usage drops below your limits.</p>
+          </div>
+          <span class="toggle on"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="download-panel" id="download">
+      <div>
+        <p class="eyebrow">Ready to Use</p>
+        <h2>Small, focused, useful.</h2>
+        <p>Check your remaining headroom before you start another long run.</p>
+      </div>
+      <a
+        class="primary-button"
+        href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.4/Limit-Bar-1.0.4.dmg"
+        data-release-download
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        <span class="button-icon" aria-hidden="true"><i data-lucide="download"></i></span>
+        Download Limit Bar
+      </a>
+    </section>
+  </main>
+
+  <footer>
+    <span translate="no">Limit Bar</span>
+    <span>macOS utility &middot; local CLI usage tracking</span>
+  </footer>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    lucide.createIcons({
+      attrs: {
+        class: "lucide-icon",
+        "stroke-width": 2
+      }
+    });
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        document.body.classList.add("is-loaded");
+      });
+    });
+
+    const releaseButtons = document.querySelectorAll("[data-release-download]");
+    const releaseVersion = document.querySelector("[data-release-version]");
+    const releaseApiUrl = "https://api.github.com/repos/artemsvit/Limit-Bar/releases/latest";
+
+    fetch(releaseApiUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Failed to load latest release");
+        }
+        return response.json();
+      })
+      .then((release) => {
+        const dmgAsset = release.assets?.find((asset) => asset.name?.endsWith(".dmg"));
+        if (!dmgAsset?.browser_download_url) {
+          return;
+        }
+
+        releaseButtons.forEach((button) => {
+          button.href = dmgAsset.browser_download_url;
+        });
+
+        if (releaseVersion && release.tag_name) {
+          const versionLabel = release.tag_name.replace(/^v/i, "");
+          releaseVersion.textContent = `Version ${versionLabel} · macOS 15.6+`;
+        }
+      })
+      .catch(() => {
+        // Keep the baked-in release URL as a safe fallback.
+      });
+  </script>
+</body>
+</html>
