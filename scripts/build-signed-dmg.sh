@@ -213,40 +213,53 @@ if [[ -z "$DMG_DEVICE" || -z "$VOLUME_PATH" || ! -d "$VOLUME_PATH" ]]; then
   exit 67
 fi
 
+SetFile -a V "$VOLUME_PATH/.background" 2>/dev/null || true
+
 osascript <<EOF
 tell application "Finder"
   activate
-  open POSIX file "$VOLUME_PATH"
+  set volumeAlias to POSIX file "$VOLUME_PATH" as alias
+  open volumeAlias
   delay 1
-  set theWindow to container window of disk "$VOLUME_NAME"
+  set theWindow to container window of volumeAlias
   set current view of theWindow to icon view
-  try
-    set toolbar visible of theWindow to false
-  end try
-  try
-    set statusbar visible of theWindow to false
-  end try
-  try
-    set bounds of theWindow to {120, 120, $((120 + DMG_WINDOW_WIDTH)), $((120 + DMG_WINDOW_HEIGHT))}
-  end try
-  try
-    set theViewOptions to icon view options of theWindow
-    set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 96
-    set background picture of theViewOptions to ((POSIX file "$VOLUME_PATH/.background/background.png") as alias)
-  end try
-  try
-    set position of item "${APP_NAME}.app" of theWindow to {196, 236}
-  end try
-  try
-    set position of item "Applications" of theWindow to {520, 236}
-  end try
+  set toolbar visible of theWindow to false
+  set statusbar visible of theWindow to false
+  set bounds of theWindow to {120, 120, $((120 + DMG_WINDOW_WIDTH)), $((120 + DMG_WINDOW_HEIGHT))}
+
+  set theViewOptions to icon view options of theWindow
+  set arrangement of theViewOptions to not arranged
+  set icon size of theViewOptions to 96
+  set background color of theViewOptions to {60426, 61903, 63264}
+
+  set position of item "${APP_NAME}.app" of theWindow to {196, 236}
+  set position of item "Applications" of theWindow to {520, 236}
   delay 3
-  try
-    close theWindow
-  end try
+  close theWindow
 end tell
 EOF
+
+LAYOUT_CHECK="$(osascript <<EOF
+tell application "Finder"
+  set volumeAlias to POSIX file "$VOLUME_PATH" as alias
+  open volumeAlias
+  delay 1
+  set theWindow to container window of volumeAlias
+  set theViewOptions to icon view options of theWindow
+  set backgroundValue to background color of theViewOptions
+  set appPosition to position of item "${APP_NAME}.app" of theWindow
+  set applicationsPosition to position of item "Applications" of theWindow
+  close theWindow
+  return (backgroundValue as text) & "|" & (appPosition as text) & "|" & (applicationsPosition as text)
+end tell
+EOF
+)"
+
+if [[ "$LAYOUT_CHECK" == 65535* || "$LAYOUT_CHECK" != *"|196236|520236"* ]]; then
+  echo "Finder did not persist the DMG window layout."
+  echo "Layout check: $LAYOUT_CHECK"
+  exit 68
+fi
 
 sync
 sleep 1
