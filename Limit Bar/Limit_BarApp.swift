@@ -10,6 +10,7 @@ import AppKit
 import Combine
 import UserNotifications
 import Sparkle
+import QuartzCore
 
 @main
 struct Limit_BarApp: App {
@@ -107,10 +108,11 @@ final class AppUpdater: ObservableObject {
 @MainActor
 final class StatusBarController: NSObject {
     private let store: LimitStore
+    private let displayPreferences = MenuBarDisplayPreferencesStore.shared
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private let iconView = UsageStatusIconView(frame: NSRect(x: 0, y: 0, width: 24, height: 22))
-    private var cancellable: AnyCancellable?
+    private var cancellables = Set<AnyCancellable>()
 
     init(store: LimitStore) {
         self.store = store
@@ -135,11 +137,19 @@ final class StatusBarController: NSObject {
         }
 
         refreshIcon()
-        cancellable = store.objectWillChange.sink { [weak self] _ in
-            Task { @MainActor in
-                self?.refreshIcon()
+        store.objectWillChange
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    self?.refreshIcon()
+                }
             }
-        }
+            .store(in: &cancellables)
+
+        displayPreferences.$mode
+            .sink { [weak self] mode in
+                self?.refreshIcon(displayMode: mode)
+            }
+            .store(in: &cancellables)
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {
@@ -153,11 +163,45 @@ final class StatusBarController: NSObject {
         }
     }
 
-    private func refreshIcon() {
+    private func refreshIcon(displayMode: MenuBarDisplayMode? = nil) {
         let connected = store.services.filter(\.isConnected)
         let current = connected.compactMap { $0.current?.remainingPercent }.min() ?? 0
         let weekly = connected.compactMap { $0.weekly?.remainingPercent }.min() ?? 0
-        iconView.update(currentPercent: current, weeklyPercent: weekly, hasConnection: !connected.isEmpty)
+        let hasConnection = !connected.isEmpty
+        iconView.update(currentPercent: current, weeklyPercent: weekly, hasConnection: hasConnection)
+        updateStatusButton(
+            currentPercent: current,
+            hasConnection: hasConnection,
+            displayMode: displayMode ?? displayPreferences.mode
+        )
+    }
+
+    private func updateStatusButton(currentPercent: Int, hasConnection: Bool, displayMode: MenuBarDisplayMode) {
+        guard let button = statusItem.button else { return }
+
+        switch displayMode {
+        case .bars:
+            statusItem.length = 24
+            button.title = ""
+            button.attributedTitle = NSAttributedString()
+            button.toolTip = "Limit Bar"
+            iconView.isHidden = false
+            iconView.frame = button.bounds
+
+        case .currentPercent:
+            iconView.isHidden = true
+            let title = hasConnection ? "\(currentPercent)%" : "--%"
+            let attributedTitle = NSAttributedString(
+                string: title,
+                attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .semibold),
+                    .foregroundColor: NSColor.labelColor
+                ]
+            )
+            statusItem.length = ceil(attributedTitle.size().width) + 12
+            button.attributedTitle = attributedTitle
+            button.toolTip = hasConnection ? "Current usage remaining: \(currentPercent)%" : "Limit Bar"
+        }
     }
 }
 
@@ -227,8 +271,8 @@ final class UsageStatusIconView: NSView {
 final class SettingsWindowPresenter {
     static let shared = SettingsWindowPresenter()
 
-    private let compactHeight: CGFloat = 650
-    private let expandedHeight: CGFloat = 830
+    private let windowHeight: CGFloat = 710
+    private let windowWidth: CGFloat = 580
     private var window: NSWindow?
 
     func open(store: LimitStore) {
@@ -244,7 +288,7 @@ final class SettingsWindowPresenter {
         )
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: compactHeight),
+            contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -252,7 +296,7 @@ final class SettingsWindowPresenter {
         window.title = "Settings"
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 620, height: compactHeight)
+        window.minSize = NSSize(width: windowWidth, height: windowHeight)
         window.contentView = hostingView
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -261,23 +305,7 @@ final class SettingsWindowPresenter {
         self.window = window
     }
 
-    func updateHeight(showingNotificationsDetails: Bool) {
-        guard let window else { return }
-
-        let targetHeight = showingNotificationsDetails ? expandedHeight : compactHeight
-        guard abs(window.frame.height - targetHeight) > 0.5 else { return }
-
-        DispatchQueue.main.async {
-            guard let window = self.window else { return }
-            var frame = window.frame
-            frame.origin.y += frame.height - targetHeight
-            frame.size.height = targetHeight
-
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0
-                context.allowsImplicitAnimation = false
-                window.animator().setFrame(frame, display: true)
-            }
-        }
+    func updateHeight(showingNotificationsDetails: Bool, animated: Bool = true) {
+        // Settings uses a fixed-height window so accordions never shake the window frame.
     }
 }

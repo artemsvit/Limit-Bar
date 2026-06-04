@@ -220,17 +220,31 @@ tell application "Finder"
   delay 1
   set theWindow to container window of disk "$VOLUME_NAME"
   set current view of theWindow to icon view
-  set toolbar visible of theWindow to false
-  set statusbar visible of theWindow to false
-  set bounds of theWindow to {120, 120, $((120 + DMG_WINDOW_WIDTH)), $((120 + DMG_WINDOW_HEIGHT))}
-  set theViewOptions to icon view options of theWindow
-  set arrangement of theViewOptions to not arranged
-  set icon size of theViewOptions to 96
-  set background picture of theViewOptions to ((POSIX file "$VOLUME_PATH/.background/background.png") as alias)
-  set position of item "${APP_NAME}.app" of theWindow to {196, 236}
-  set position of item "Applications" of theWindow to {520, 236}
+  try
+    set toolbar visible of theWindow to false
+  end try
+  try
+    set statusbar visible of theWindow to false
+  end try
+  try
+    set bounds of theWindow to {120, 120, $((120 + DMG_WINDOW_WIDTH)), $((120 + DMG_WINDOW_HEIGHT))}
+  end try
+  try
+    set theViewOptions to icon view options of theWindow
+    set arrangement of theViewOptions to not arranged
+    set icon size of theViewOptions to 96
+    set background picture of theViewOptions to ((POSIX file "$VOLUME_PATH/.background/background.png") as alias)
+  end try
+  try
+    set position of item "${APP_NAME}.app" of theWindow to {196, 236}
+  end try
+  try
+    set position of item "Applications" of theWindow to {520, 236}
+  end try
   delay 3
-  close theWindow
+  try
+    close theWindow
+  end try
 end tell
 EOF
 
@@ -259,7 +273,7 @@ if [[ "$NOTARIZE" == "1" ]]; then
   xcrun stapler validate "$DMG_PATH"
 
   echo "Checking Gatekeeper assessment..."
-  spctl -a -vv --type open "$DMG_PATH"
+  spctl -a -vv --type open --context context:primary-signature "$DMG_PATH"
 else
   echo "Notarization skipped. This DMG is signed but is not Gatekeeper-ready until notarized and stapled."
   echo "To create a Gatekeeper-ready DMG, store notary credentials and rerun:"

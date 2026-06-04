@@ -96,6 +96,40 @@ struct NotificationPreferences: Codable, Equatable {
     }
 }
 
+enum MenuBarDisplayMode: String, Codable, CaseIterable {
+    case bars
+    case currentPercent
+}
+
+@MainActor
+final class MenuBarDisplayPreferencesStore: ObservableObject {
+    static let shared = MenuBarDisplayPreferencesStore()
+
+    @Published var mode: MenuBarDisplayMode {
+        didSet { save() }
+    }
+
+    private let storageKey = "limit-bar.menu-bar-display-mode.v1"
+
+    private init() {
+        if let raw = UserDefaults.standard.string(forKey: storageKey),
+           let decoded = MenuBarDisplayMode(rawValue: raw) {
+            mode = decoded
+        } else {
+            mode = .bars
+        }
+    }
+
+    var showsCurrentPercent: Bool {
+        get { mode == .currentPercent }
+        set { mode = newValue ? .currentPercent : .bars }
+    }
+
+    private func save() {
+        UserDefaults.standard.set(mode.rawValue, forKey: storageKey)
+    }
+}
+
 @MainActor
 final class NotificationPreferencesStore: ObservableObject {
     static let shared = NotificationPreferencesStore()
@@ -530,9 +564,13 @@ struct ClaudeCLIConnector {
     static func fetch() async throws -> ProviderSnapshot {
         try await ensureLoggedIn()
 
+        if let statusLineSnapshot = try await fetchStatusLineUsage() {
+            return statusLineSnapshot
+        }
+
         let result = try await ProcessRunner.run(
             executable: "/usr/bin/env",
-            arguments: ["claude", "--allowed-tools", "", "--print", "/usage"],
+            arguments: ["claude", "--print", "/usage"],
             input: nil,
             timeout: 14
         )
@@ -549,6 +587,55 @@ struct ClaudeCLIConnector {
         return try parseUsage(output)
     }
 
+    private static func fetchStatusLineUsage() async throws -> ProviderSnapshot? {
+        let fileManager = FileManager.default
+        let tempDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("limitbar-claude-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDirectory) }
+
+        let captureURL = tempDirectory.appendingPathComponent("statusline.json")
+        let settingsURL = tempDirectory.appendingPathComponent("settings.json")
+        let probeDirectory = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/CodexBar/ClaudeProbe", isDirectory: true)
+        try fileManager.createDirectory(at: probeDirectory, withIntermediateDirectories: true)
+
+        let captureCommand = "python3 -c 'import pathlib,sys; pathlib.Path(\"\(captureURL.path)\").write_text(sys.stdin.read())'"
+        let settings: [String: Any] = [
+            "statusLine": [
+                "type": "command",
+                "command": captureCommand,
+                "refreshInterval": 1
+            ]
+        ]
+        let settingsData = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted])
+        try settingsData.write(to: settingsURL)
+
+        let script = """
+        ( sleep 4; printf '/exit\\r'; sleep 1 ) | /usr/bin/script -q /dev/null /usr/bin/env claude --settings \(settingsURL.path.shellQuoted)
+        """
+
+        do {
+            _ = try await ProcessRunner.run(
+                executable: "/bin/zsh",
+                arguments: ["-lc", script],
+                input: nil,
+                timeout: 14,
+                currentDirectory: probeDirectory
+            )
+        } catch {
+            return nil
+        }
+
+        guard let data = try? Data(contentsOf: captureURL),
+              let raw = String(data: data, encoding: .utf8),
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        return try parseStatusLine(raw)
+    }
+
     private static func ensureLoggedIn() async throws {
         let result = try await ProcessRunner.run(
             executable: "/usr/bin/env",
@@ -563,6 +650,41 @@ struct ClaudeCLIConnector {
             output.localizedCaseInsensitiveContains("not logged in") {
             throw ConnectorError.message("Claude Code is not logged in for CLI access. Run `claude auth login` in Terminal, finish the browser login, then retry.")
         }
+    }
+
+    private static func parseStatusLine(_ output: String) throws -> ProviderSnapshot? {
+        guard let data = output.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rateLimits = json["rate_limits"] as? [String: Any] else {
+            return nil
+        }
+
+        let current = makeStatusLineBalance(
+            title: "5 hour usage limit",
+            dictionary: rateLimits["five_hour"] as? [String: Any],
+            fallbackReset: Date().addingTimeInterval(5 * 60 * 60)
+        )
+        let weekly = makeStatusLineBalance(
+            title: "Weekly usage limit",
+            dictionary: rateLimits["seven_day"] as? [String: Any],
+            fallbackReset: Date().addingTimeInterval(7 * 24 * 60 * 60)
+        )
+
+        guard current != nil || weekly != nil else { return nil }
+        return ProviderSnapshot(current: current, weekly: weekly, credits: nil, accountEmail: nil, planName: "Claude")
+    }
+
+    private static func makeStatusLineBalance(title: String, dictionary: [String: Any]?, fallbackReset: Date) -> LimitBalance? {
+        guard let dictionary,
+              let used = number(dictionary["used_percentage"] ?? dictionary["usedPercent"]) else { return nil }
+
+        let resetDate = number(dictionary["resets_at"] ?? dictionary["resetsAt"])
+            .map { Date(timeIntervalSince1970: $0) } ?? fallbackReset
+        return LimitBalance(
+            title: title,
+            remainingPercent: clampPercent(100 - Int(used.rounded())),
+            resetsAt: resetDate
+        )
     }
 
     private static func parseUsage(_ output: String) throws -> ProviderSnapshot {
@@ -582,7 +704,11 @@ struct ClaudeCLIConnector {
             )
         }
 
-        throw ConnectorError.message("Claude Code did not expose subscription usage. `/usage` usually requires a Claude Code paid subscription; API-key usage is not available in this connector yet.")
+        if isClaudeSessionUsageSummary(clean) {
+            throw ConnectorError.message("Claude Code is connected, but this account only exposed session/API usage, not 5-hour and weekly subscription limits. Limit Bar can read Claude limits when Claude Code provides `rate_limits` through its status line.")
+        }
+
+        throw ConnectorError.message("Claude Code did not expose 5-hour or weekly usage limits in a recognized format.")
     }
 
     private static func normalizeClaudePercent(_ value: Int, _ text: String) -> Int {
@@ -591,6 +717,15 @@ struct ClaudeCLIConnector {
             return clampPercent(100 - value)
         }
         return value
+    }
+
+    private static func isClaudeSessionUsageSummary(_ output: String) -> Bool {
+        let lower = output.lowercased()
+        return lower.contains("total cost:") &&
+            lower.contains("total duration") &&
+            lower.contains("usage:") &&
+            lower.contains("input") &&
+            lower.contains("output")
     }
 }
 
@@ -684,7 +819,8 @@ struct ProcessRunner {
         arguments: [String],
         input: String?,
         timeout: TimeInterval,
-        environmentOverrides: [String: String] = [:]
+        environmentOverrides: [String: String] = [:],
+        currentDirectory: URL? = nil
     ) async throws -> Result {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
@@ -699,6 +835,7 @@ struct ProcessRunner {
             process.standardError = stderrPipe
             if input != nil { process.standardInput = stdinPipe }
             process.environment = mergedEnvironment(overrides: environmentOverrides)
+            process.currentDirectoryURL = currentDirectory
 
             @Sendable
             func finish(_ action: () throws -> Result) {
@@ -811,6 +948,10 @@ private func openURL(_ string: String) {
 }
 
 private extension String {
+    var shellQuoted: String {
+        "'\(replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
     func strippingANSI() -> String {
         replacingOccurrences(of: #"\u001B\[[0-9;?]*[A-Za-z]"#, with: "", options: .regularExpression)
     }
@@ -943,8 +1084,8 @@ struct ConnectServiceRow: View {
     let service: ServiceLimit
 
     var body: some View {
-        HStack(spacing: 12) {
-            ServiceIcon(service: service.id, size: 42)
+        HStack(spacing: 10) {
+            ServiceIcon(service: service.id, size: 36)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(service.id.rawValue)
@@ -952,7 +1093,8 @@ struct ConnectServiceRow: View {
                 Text(statusText)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
 
             Spacer()
@@ -965,13 +1107,11 @@ struct ConnectServiceRow: View {
                 ServiceActionPill(service: service.id, isConnected: false, compact: false, disconnectedTitle: service.state == .failed ? "Retry" : "Connect")
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 15)
-        .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.separator.opacity(0.32), lineWidth: 1)
-        )
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(height: 60)
+        .settingsCardSurface(cornerRadius: 15)
+        .help(service.errorMessage ?? statusText)
     }
 
     private var statusText: String {
@@ -979,7 +1119,7 @@ struct ConnectServiceRow: View {
         case .disconnected: return "Ready to connect"
         case .connecting: return "Reading local usage"
         case .connected: return "Connected"
-        case .failed: return service.errorMessage ?? "Connection failed"
+        case .failed: return shortProviderError(service)
         }
     }
 }
@@ -1008,13 +1148,13 @@ struct ServiceActionPill: View {
                     .contentTransition(.opacity)
             }
             .foregroundStyle(foregroundColor)
-            .frame(width: compact ? 98 : 116, height: compact ? 28 : 30)
+            .frame(width: compact ? 94 : 108, height: compact ? 27 : 29)
             .background(backgroundFill, in: Capsule())
             .overlay(
                 Capsule()
                     .strokeBorder(borderColor, lineWidth: 1)
             )
-            .shadow(color: shadowColor, radius: isConnected ? 8 : 5, y: 2)
+            .shadow(color: shadowColor, radius: isConnected ? 4 : 2, y: 1)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
@@ -1043,77 +1183,48 @@ struct ServiceActionPill: View {
 
     private var foregroundColor: Color {
         if isConnected {
-            return Color.white.opacity(0.95)
+            return isHovering ? SettingsPalette.destructiveText : SettingsPalette.successText
         }
-        return disconnectedTitle == "Connect"
-            ? Color.white.opacity(0.95)
-            : Color.primary.opacity(0.9)
+        if disconnectedTitle == "Connect" {
+            return SettingsPalette.actionText
+        }
+        return .primary
     }
 
     private var backgroundFill: AnyShapeStyle {
         if isConnected {
             if isHovering {
-                return AnyShapeStyle(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.88, green: 0.45, blue: 0.47),
-                            Color(red: 0.67, green: 0.19, blue: 0.23),
-                            Color(red: 0.41, green: 0.11, blue: 0.15)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
+                return AnyShapeStyle(SettingsPalette.destructiveButtonSurface)
             }
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.55, green: 0.88, blue: 0.63),
-                        Color(red: 0.28, green: 0.67, blue: 0.39),
-                        Color(red: 0.14, green: 0.40, blue: 0.24)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
+            return AnyShapeStyle(SettingsPalette.successButtonSurface)
         }
         if disconnectedTitle == "Connect" {
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.54, green: 0.78, blue: 1.00),
-                        Color(red: 0.23, green: 0.57, blue: 0.98),
-                        Color(red: 0.05, green: 0.37, blue: 0.88)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
+            return AnyShapeStyle(isHovering ? SettingsPalette.actionButtonSurfaceHover : SettingsPalette.actionButtonSurface)
         }
-        return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+        return AnyShapeStyle(SettingsPalette.buttonSurface)
     }
 
     private var borderColor: Color {
         if isConnected {
-            return Color.white.opacity(isHovering ? 0.24 : 0.22)
+            return isHovering ? SettingsPalette.destructiveBorder : SettingsPalette.successBorder
         }
         if disconnectedTitle == "Connect" {
-            return Color.white.opacity(0.18)
+            return SettingsPalette.actionBorder
         }
-        return Color.primary.opacity(0.08)
+        return SettingsPalette.border
     }
 
     private var shadowColor: Color {
         if isConnected {
             if isHovering {
-                return Color(red: 0.55, green: 0.18, blue: 0.20).opacity(0.30)
+                return SettingsPalette.redFill.opacity(0.08)
             }
-            return Color(red: 0.18, green: 0.62, blue: 0.34).opacity(0.28)
+            return SettingsPalette.greenFill.opacity(0.08)
         }
         if disconnectedTitle == "Connect" {
-            return Color(red: 0.12, green: 0.38, blue: 0.84).opacity(0.24)
+            return SettingsPalette.blueFill.opacity(isHovering ? 0.10 : 0.06)
         }
-        return .black.opacity(0.06)
+        return .black.opacity(0.12)
     }
 
     private var helpText: String {
@@ -1135,11 +1246,11 @@ struct ConnectingActionPill: View {
                 .font(compact ? .caption.weight(.semibold) : .callout.weight(.semibold))
         }
         .foregroundStyle(.secondary)
-        .frame(width: compact ? 98 : 116, height: compact ? 28 : 30)
-        .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+        .frame(width: compact ? 94 : 108, height: compact ? 27 : 29)
+        .background(SettingsPalette.buttonSurface, in: Capsule())
         .overlay(
             Capsule()
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                .stroke(SettingsPalette.border, lineWidth: 1)
         )
     }
 }
@@ -1158,13 +1269,13 @@ struct UpdateActionPill: View {
                     .font(.callout.weight(.semibold))
             }
             .foregroundStyle(foregroundColor)
-            .frame(width: 116, height: 30)
+            .frame(width: 112, height: 29)
             .background(backgroundFill, in: Capsule())
             .overlay(
                 Capsule()
                     .strokeBorder(borderColor, lineWidth: 1)
             )
-            .shadow(color: shadowColor, radius: isEnabled ? 5 : 0, y: 2)
+            .shadow(color: shadowColor, radius: isEnabled ? 4 : 0, y: 1)
             .opacity(isEnabled ? 1 : 0.62)
         }
         .buttonStyle(.plain)
@@ -1174,37 +1285,23 @@ struct UpdateActionPill: View {
     }
 
     private var foregroundColor: Color {
-        isEnabled ? Color.white.opacity(0.95) : Color.secondary
+        isEnabled ? SettingsPalette.actionText : .secondary
     }
 
     private var backgroundFill: AnyShapeStyle {
         if isEnabled {
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: isHovering ? [
-                        Color(red: 0.62, green: 0.82, blue: 1.00),
-                        Color(red: 0.32, green: 0.62, blue: 0.98),
-                        Color(red: 0.08, green: 0.42, blue: 0.90)
-                    ] : [
-                        Color(red: 0.54, green: 0.78, blue: 1.00),
-                        Color(red: 0.23, green: 0.57, blue: 0.98),
-                        Color(red: 0.05, green: 0.37, blue: 0.88)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
+            return AnyShapeStyle(isHovering ? SettingsPalette.actionButtonSurfaceHover : SettingsPalette.actionButtonSurface)
         }
 
-        return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+        return AnyShapeStyle(SettingsPalette.buttonSurface)
     }
 
     private var borderColor: Color {
-        isEnabled ? Color.white.opacity(0.18) : Color.primary.opacity(0.08)
+        isEnabled ? SettingsPalette.actionBorder : SettingsPalette.border
     }
 
     private var shadowColor: Color {
-        isEnabled ? Color(red: 0.12, green: 0.38, blue: 0.84).opacity(isHovering ? 0.30 : 0.24) : .clear
+        isEnabled ? SettingsPalette.blueFill.opacity(isHovering ? 0.10 : 0.06) : .clear
     }
 }
 
@@ -1246,14 +1343,14 @@ struct DashboardView: View {
                 } label: {
                     Label("Start over", systemImage: "arrow.uturn.backward")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(DashboardActionButtonStyle())
 
                 Button {
                     store.refreshConnected()
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(DashboardActionButtonStyle())
             }
 
             VStack(spacing: 12) {
@@ -1356,11 +1453,7 @@ struct CreditsRow: View {
                 .foregroundStyle(.secondary)
         }
         .padding(12)
-        .background(.background.opacity(0.45), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .stroke(.separator.opacity(0.28), lineWidth: 1)
-        )
+        .settingsCardSurface(cornerRadius: 13, fill: SettingsPalette.surfaceRaised)
     }
 
     private var valueText: String {
@@ -1426,11 +1519,7 @@ struct BalanceMetric: View {
                 .foregroundStyle(headroomColor)
         }
         .padding(13)
-        .background(.background.opacity(0.48), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.separator.opacity(0.35), lineWidth: 1)
-        )
+        .settingsCardSurface(cornerRadius: 16, fill: SettingsPalette.surfaceRaised)
     }
 
     private var resetText: String {
@@ -1474,7 +1563,7 @@ struct LimitProgressBar: View {
                         Capsule()
                             .stroke(style.highlightBorder, lineWidth: 1)
                     )
-                    .shadow(color: style.shadowColor, radius: 8, y: 3)
+                    .shadow(color: style.shadowColor, radius: 4, y: 1)
             }
         }
     }
@@ -1483,17 +1572,17 @@ struct LimitProgressBar: View {
         AnyShapeStyle(
             LinearGradient(
                 colors: [
-                    Color.white.opacity(0.05),
-                    Color.black.opacity(0.18)
+                    SettingsPalette.trackTop,
+                    SettingsPalette.trackBottom
                 ],
-                startPoint: .top,
-                endPoint: .bottom
+                startPoint: .trailing,
+                endPoint: .leading
             )
         )
     }
 
     private var trackBorder: Color {
-        Color.white.opacity(0.08)
+        SettingsPalette.trackBorder
     }
 }
 
@@ -1532,8 +1621,8 @@ struct MenuBarProgressIcon: View {
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 3) {
-            VerticalMenuBar(percent: currentPercent)
-            VerticalMenuBar(percent: weeklyPercent)
+            VerticalMenuBar(percent: currentPercent, style: .current)
+            VerticalMenuBar(percent: weeklyPercent, style: .weekly)
         }
         .padding(.horizontal, 2)
         .frame(width: 18, height: 18)
@@ -1543,26 +1632,24 @@ struct MenuBarProgressIcon: View {
 
 struct VerticalMenuBar: View {
     let percent: Int
+    let style: UsageAccentStyle
 
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .bottom) {
                 Capsule()
-                    .fill(Color.primary.opacity(0.24))
+                    .fill(SettingsPalette.iconTrack)
+                    .overlay(
+                        Capsule()
+                            .stroke(SettingsPalette.iconTrackBorder, lineWidth: 0.5)
+                    )
 
                 Capsule()
-                    .fill(color)
+                    .fill(percent == 0 ? AnyShapeStyle(SettingsPalette.iconTrackMuted) : style.fill)
                     .frame(height: max(proxy.size.height * CGFloat(percent) / 100, percent > 0 ? 4 : 0))
             }
         }
         .frame(width: 6)
-    }
-
-    private var color: Color {
-        if percent == 0 { return Color.primary.opacity(0.24) }
-        if percent < 20 { return .red }
-        if percent < 45 { return .orange }
-        return .green
     }
 }
 
@@ -1574,7 +1661,7 @@ struct MenuSetupView: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("AI Usage Limits")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                     Text("Connect local AI usage")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1582,14 +1669,13 @@ struct MenuSetupView: View {
 
                 Spacer()
 
-                Button {
+                MenuHeaderIconButton(systemName: "gearshape", helpText: "Open settings") {
                     SettingsWindowPresenter.shared.open(store: store)
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 15, weight: .semibold))
-                        .frame(width: 26, height: 26)
                 }
-                .buttonStyle(.plain)
+
+                MenuHeaderIconButton(systemName: "power") {
+                    NSApp.terminate(nil)
+                }
             }
 
             VStack(spacing: 10) {
@@ -1615,17 +1701,16 @@ struct MenuUsageView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Text("AI Usage Limits")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                 Spacer()
 
-                Button {
+                MenuHeaderIconButton(systemName: "gearshape", helpText: "Open settings") {
                     SettingsWindowPresenter.shared.open(store: store)
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 15, weight: .semibold))
-                        .frame(width: 26, height: 26)
                 }
-                .buttonStyle(.plain)
+
+                MenuHeaderIconButton(systemName: "power") {
+                    NSApp.terminate(nil)
+                }
             }
 
             ForEach(store.activeServices.filter(\.isConnected)) { service in
@@ -1641,7 +1726,7 @@ struct MenuUsageView: View {
                     CompactBalanceRow(kind: "Weekly", balance: service.weekly)
                 }
                 .padding(10)
-                .background(.background.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .settingsCardSurface(cornerRadius: 14, fill: SettingsPalette.surfaceRaised)
             }
 
         }
@@ -1663,7 +1748,8 @@ struct MenuConnectRow: View {
                 Text(statusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
 
             Spacer()
@@ -1678,11 +1764,7 @@ struct MenuConnectRow: View {
         }
         .padding(.horizontal, compact ? 10 : 12)
         .padding(.vertical, compact ? 8 : 11)
-        .background(.background.opacity(0.45), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .stroke(.separator.opacity(0.32), lineWidth: 1)
-        )
+        .settingsCardSurface(cornerRadius: 13, fill: SettingsPalette.surfaceRaised)
     }
 
     private var statusText: String {
@@ -1690,115 +1772,168 @@ struct MenuConnectRow: View {
         case .disconnected: return compact ? "Not connected" : "Ready to connect"
         case .connecting: return "Reading local usage"
         case .connected: return "Connected"
-        case .failed: return service.errorMessage ?? "Connection failed"
+        case .failed: return shortProviderError(service)
         }
+    }
+}
+
+private func shortProviderError(_ service: ServiceLimit) -> String {
+    guard let message = service.errorMessage else { return "Connection failed" }
+    let lower = message.lowercased()
+
+    if service.id == .claude {
+        if lower.contains("session/api") || lower.contains("5-hour") || lower.contains("weekly") || lower.contains("rate_limits") {
+            return "Usage limits unavailable"
+        }
+        if lower.contains("not logged in") || lower.contains("login") {
+            return "Sign in required"
+        }
+        if lower.contains("timed out") {
+            return "Claude did not respond"
+        }
+    }
+
+    if lower.contains("timed out") {
+        return "Timed out"
+    }
+    if lower.contains("not found") {
+        return "CLI not found"
+    }
+
+    return message
+}
+
+struct MenuHeaderIconButton: View {
+    let systemName: String
+    var helpText = "Quit Limit Bar"
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 26, height: 26)
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
     }
 }
 
 struct SettingsWindowView: View {
     @EnvironmentObject private var store: LimitStore
     @StateObject private var notificationSettings = NotificationPreferencesStore.shared
+    @StateObject private var menuBarDisplaySettings = MenuBarDisplayPreferencesStore.shared
     @StateObject private var appUpdater = AppUpdater.shared
     @State private var startsAtLogin = LaunchAtLoginController.isEnabled
+    @State private var notificationDetailsExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("Limit Bar Settings")
-                    .font(.system(size: 28, weight: .semibold, design: .rounded))
-                Text("Connect local providers used by AI Usage Limits.")
+                    .font(.system(size: 25, weight: .semibold, design: .rounded))
+                Text("Manage local providers, alerts, and updates.")
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
-            VStack(spacing: 12) {
+            VStack(spacing: 10) {
                 ForEach(store.activeServices) { service in
                     ConnectServiceRow(service: service)
                 }
             }
 
-            Divider()
+            Rectangle()
+                .fill(SettingsPalette.divider)
+                .frame(height: 1)
 
-            HStack(spacing: 12) {
-                Image(systemName: "power.circle.fill")
-                    .font(.system(size: 42))
-                    .frame(width: 42, height: 42)
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.54, green: 0.78, blue: 1.00),
-                                Color(red: 0.23, green: 0.57, blue: 0.98),
-                                Color(red: 0.05, green: 0.37, blue: 0.88)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Start at login")
-                        .font(.headline)
-                    Text("Launch Limit Bar automatically when you sign in.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-
-                Spacer()
-
-                Toggle("", isOn: $startsAtLogin)
-                    .labelsHidden()
-                    .toggleStyle(BrandedLoginToggleStyle())
-                    .onChange(of: startsAtLogin) { _, isEnabled in
-                        LaunchAtLoginController.setEnabled(isEnabled)
-                        startsAtLogin = LaunchAtLoginController.isEnabled
-                    }
-            }
-            .padding(14)
-            .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(.separator.opacity(0.32), lineWidth: 1)
-            )
+            appOptionsCard
 
             notificationCard
 
             updatesCard
-
-            Spacer(minLength: 0)
         }
-        .padding(28)
-        .frame(width: 620, alignment: .topLeading)
+        .padding(22)
+        .frame(width: 580, height: 710, alignment: .topLeading)
         .background(AppSurfaceBackground())
         .onAppear {
-            SettingsWindowPresenter.shared.updateHeight(showingNotificationsDetails: notificationSettings.isEnabled)
+            notificationDetailsExpanded = notificationSettings.isEnabled
         }
         .onChange(of: notificationSettings.isEnabled) { _, isEnabled in
-            SettingsWindowPresenter.shared.updateHeight(showingNotificationsDetails: isEnabled)
+            updateNotificationDetailsVisibility(isEnabled: isEnabled)
+        }
+    }
+
+    private var appOptionsCard: some View {
+        VStack(spacing: 10) {
+            startAtLoginRow
+
+            Rectangle()
+                .fill(SettingsPalette.divider)
+                .frame(height: 1)
+
+            menuBarDisplayRow
+        }
+        .padding(12)
+        .settingsCardSurface(cornerRadius: 15)
+    }
+
+    private var startAtLoginRow: some View {
+        HStack(spacing: 10) {
+            SettingsAccentIcon(systemName: "power", tint: .blue)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Start at login")
+                    .font(.headline)
+                Text("Open Limit Bar when you sign in.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: $startsAtLogin)
+                .labelsHidden()
+                .toggleStyle(BrandedLoginToggleStyle())
+                .onChange(of: startsAtLogin) { _, isEnabled in
+                    LaunchAtLoginController.setEnabled(isEnabled)
+                    startsAtLogin = LaunchAtLoginController.isEnabled
+                }
+        }
+    }
+
+    private var menuBarDisplayRow: some View {
+        HStack(spacing: 10) {
+            SettingsAccentIcon(systemName: "percent", tint: .blue)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Show current percent")
+                    .font(.headline)
+                Text("Use 97% in the macOS menu bar instead of two bars.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: menuBarPercentBinding)
+                .labelsHidden()
+                .toggleStyle(BrandedLoginToggleStyle())
         }
     }
 
     private var notificationCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Image(systemName: "bell.badge.fill")
-                    .font(.system(size: 42))
-                    .frame(width: 42, height: 42)
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.54, green: 0.78, blue: 1.00),
-                                Color(red: 0.23, green: 0.57, blue: 0.98),
-                                Color(red: 0.05, green: 0.37, blue: 0.88)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                SettingsAccentIcon(systemName: "bell", tint: .blue)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Usage notifications")
                         .font(.headline)
-                    Text("Get notified when remaining usage drops below your thresholds.")
+                    Text("Alert when remaining usage drops below your limits.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -1811,61 +1946,45 @@ struct SettingsWindowView: View {
                     .toggleStyle(BrandedLoginToggleStyle())
             }
 
-            if notificationSettings.isEnabled {
-                Divider()
+            AccordionContent(isExpanded: notificationDetailsExpanded) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Rectangle()
+                        .fill(SettingsPalette.divider)
+                        .frame(height: 1)
 
-                HStack {
-                    Text("Thresholds")
-                        .font(.callout.weight(.semibold))
-                    Spacer()
-                    Button("Test Notification") {
-                        UsageNotificationCenter.sendTestNotification()
+                    HStack {
+                        Text("Thresholds")
+                            .font(.callout.weight(.semibold))
+                        Spacer()
+                        Button("Test Notification") {
+                            UsageNotificationCenter.sendTestNotification()
+                        }
+                        .font(.callout.weight(.medium))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    Button("Defaults") {
-                        notificationSettings.restoreDefaults()
+
+                    HStack(spacing: 8) {
+                        ThresholdEditorCard(title: "Early", value: notificationSettings.thresholdBinding(at: 0))
+                        ThresholdEditorCard(title: "Warn", value: notificationSettings.thresholdBinding(at: 1))
+                        ThresholdEditorCard(title: "Critical", value: notificationSettings.thresholdBinding(at: 2))
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                }
 
-                HStack(spacing: 10) {
-                    ThresholdEditorCard(title: "Early", value: notificationSettings.thresholdBinding(at: 0), style: .current)
-                    ThresholdEditorCard(title: "Warn", value: notificationSettings.thresholdBinding(at: 1), style: .weekly)
-                    ThresholdEditorCard(title: "Critical", value: notificationSettings.thresholdBinding(at: 2), style: .warning)
+                    Text("Recommended: 50%, 25%, and 10%. Applies to current and weekly balances.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-
-                Text("Defaults are 50%, 25%, and 10%. Notifications apply to current and weekly balances for all connected providers.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 12)
             }
         }
-        .padding(14)
-        .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.separator.opacity(0.32), lineWidth: 1)
-        )
+        .padding(12)
+        .settingsCardSurface(cornerRadius: 15)
     }
 
     private var updatesCard: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                .font(.system(size: 42))
-                .frame(width: 42, height: 42)
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.84, green: 0.76, blue: 0.99),
-                            Color(red: 0.68, green: 0.54, blue: 0.95),
-                            Color(red: 0.41, green: 0.35, blue: 0.82)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
+        HStack(spacing: 10) {
+            SettingsAccentIcon(systemName: "arrow.triangle.2.circlepath", tint: .purple)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Software updates")
@@ -1882,12 +2001,8 @@ struct SettingsWindowView: View {
                 appUpdater.checkForUpdates()
             }
         }
-        .padding(14)
-        .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.separator.opacity(0.32), lineWidth: 1)
-        )
+        .padding(12)
+        .settingsCardSurface(cornerRadius: 15)
     }
 
     private var notificationEnabledBinding: Binding<Bool> {
@@ -1900,6 +2015,62 @@ struct SettingsWindowView: View {
                 }
             }
         )
+    }
+
+    private var menuBarPercentBinding: Binding<Bool> {
+        Binding(
+            get: { menuBarDisplaySettings.showsCurrentPercent },
+            set: { menuBarDisplaySettings.showsCurrentPercent = $0 }
+        )
+    }
+
+    private func updateNotificationDetailsVisibility(isEnabled: Bool) {
+        withAnimation(SettingsMotion.notificationsExpansion) {
+            notificationDetailsExpanded = isEnabled
+        }
+    }
+}
+
+private enum SettingsMotion {
+    static let notificationsExpansion = Animation.easeInOut(duration: 0.26)
+}
+
+private struct AccordionContent<Content: View>: View {
+    let isExpanded: Bool
+    let content: Content
+    @State private var contentHeight: CGFloat = 0
+
+    init(isExpanded: Bool, @ViewBuilder content: () -> Content) {
+        self.isExpanded = isExpanded
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .fixedSize(horizontal: false, vertical: true)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: AccordionHeightPreferenceKey.self, value: proxy.size.height)
+                }
+            )
+            .frame(height: isExpanded ? contentHeight : 0, alignment: .top)
+            .opacity(contentHeight == 0 ? 0 : 1)
+        .clipped()
+        .allowsHitTesting(isExpanded)
+        .accessibilityHidden(!isExpanded)
+        .onPreferenceChange(AccordionHeightPreferenceKey.self) { height in
+            contentHeight = height
+        }
+        .animation(SettingsMotion.notificationsExpansion, value: isExpanded)
+    }
+}
+
+private struct AccordionHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -1940,15 +2111,15 @@ struct BrandedLoginToggleStyle: ToggleStyle {
 
                 Circle()
                     .fill(knobFill(isOn: configuration.isOn))
-                    .frame(width: 24, height: 24)
+                    .frame(width: 22, height: 22)
                     .overlay(
                         Circle()
-                            .strokeBorder(Color.white.opacity(configuration.isOn ? 0.28 : 0.18), lineWidth: 0.8)
+                            .strokeBorder(configuration.isOn ? SettingsPalette.accentBorder.opacity(0.32) : SettingsPalette.borderStrong, lineWidth: 0.8)
                     )
-                    .shadow(color: .black.opacity(configuration.isOn ? 0.24 : 0.08), radius: 8, y: 2)
+                    .shadow(color: .black.opacity(configuration.isOn ? 0.28 : 0.12), radius: 4, y: 1)
                     .padding(3)
             }
-            .frame(width: 52, height: 30)
+            .frame(width: 48, height: 28)
             .animation(.spring(response: 0.25, dampingFraction: 0.82), value: configuration.isOn)
         }
         .buttonStyle(.plain)
@@ -1958,41 +2129,25 @@ struct BrandedLoginToggleStyle: ToggleStyle {
 
     private func trackFill(isOn: Bool) -> AnyShapeStyle {
         if isOn {
-            AnyShapeStyle(LinearGradient(
-                colors: [
-                    Color(red: 0.54, green: 0.78, blue: 1.00),
-                    Color(red: 0.23, green: 0.57, blue: 0.98),
-                    Color(red: 0.05, green: 0.37, blue: 0.88)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            ))
+            AnyShapeStyle(SettingsPalette.blueToggleSurface)
         } else {
-            AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+            AnyShapeStyle(SettingsPalette.buttonSurface)
         }
     }
 
     private func trackBorder(isOn: Bool) -> Color {
         if isOn {
-            return Color.white.opacity(0.22)
+            return SettingsPalette.accentBorder.opacity(0.22)
         } else {
-            return Color.primary.opacity(0.08)
+            return SettingsPalette.border
         }
     }
 
     private func knobFill(isOn: Bool) -> AnyShapeStyle {
         if isOn {
-            AnyShapeStyle(LinearGradient(
-                colors: [
-                    Color.white.opacity(0.98),
-                    Color(red: 0.86, green: 0.79, blue: 0.99),
-                    Color(red: 0.70, green: 0.58, blue: 0.95)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            ))
+            AnyShapeStyle(SettingsPalette.knobOn)
         } else {
-            AnyShapeStyle(Color.white.opacity(0.92))
+            AnyShapeStyle(SettingsPalette.knobOff)
         }
     }
 }
@@ -2000,7 +2155,6 @@ struct BrandedLoginToggleStyle: ToggleStyle {
 struct ThresholdEditorCard: View {
     let title: String
     @Binding var value: Int
-    let style: ThresholdEditorStyle
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2008,79 +2162,76 @@ struct ThresholdEditorCard: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            Text("\(value)%")
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-
-            Stepper("", value: $value, in: 1...99, step: 5)
-                .labelsHidden()
-
-            Capsule()
-                .fill(style.fill)
-                .frame(height: 10)
-                .overlay(
-                    Capsule()
-                        .stroke(style.border, lineWidth: 1)
-                )
+            ThresholdPercentField(value: $value)
         }
-        .padding(12)
+        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(.separator.opacity(0.28), lineWidth: 1)
-        )
+        .settingsCardSurface(cornerRadius: 14, fill: SettingsPalette.surfaceRaised)
     }
 }
 
-enum ThresholdEditorStyle {
-    case current
-    case weekly
-    case warning
+struct ThresholdPercentField: View {
+    @Binding var value: Int
+    @FocusState private var isFocused: Bool
+    @State private var draftText = ""
 
-    var fill: AnyShapeStyle {
-        switch self {
-        case .current:
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.54, green: 0.91, blue: 0.94),
-                        Color(red: 0.28, green: 0.77, blue: 0.85),
-                        Color(red: 0.10, green: 0.47, blue: 0.62)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-        case .weekly:
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.84, green: 0.76, blue: 0.99),
-                        Color(red: 0.68, green: 0.54, blue: 0.95),
-                        Color(red: 0.41, green: 0.35, blue: 0.82)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-        case .warning:
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.99, green: 0.72, blue: 0.54),
-                        Color(red: 0.96, green: 0.45, blue: 0.34),
-                        Color(red: 0.77, green: 0.21, blue: 0.18)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 2) {
+            TextField("50", text: $draftText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .multilineTextAlignment(.trailing)
+                .frame(width: 58)
+                .focused($isFocused)
+                .onSubmit(commitDraft)
+                .onChange(of: draftText) { _, text in
+                    sanitize(text)
+                }
+                .onChange(of: value) { _, newValue in
+                    if !isFocused {
+                        draftText = "\(newValue)"
+                    }
+                }
+                .onChange(of: isFocused) { _, focused in
+                    if focused {
+                        draftText = "\(value)"
+                    } else {
+                        commitDraft()
+                    }
+                }
+
+            Text("%")
+                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(SettingsPalette.inputSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isFocused ? SettingsPalette.inputFocusBorder : SettingsPalette.border, lineWidth: 1)
+        )
+        .onAppear {
+            draftText = "\(value)"
         }
     }
 
-    var border: Color {
-        Color.white.opacity(0.18)
+    private func sanitize(_ text: String) {
+        let filtered = String(text.filter(\.isNumber).prefix(2))
+        guard filtered != text else { return }
+        draftText = filtered
+    }
+
+    private func commitDraft() {
+        guard let typedValue = Int(draftText) else {
+            draftText = "\(value)"
+            return
+        }
+
+        let clampedValue = min(max(typedValue, 1), 99)
+        value = clampedValue
+        draftText = "\(clampedValue)"
     }
 }
 
@@ -2203,24 +2354,22 @@ enum UsageAccentStyle {
             return AnyShapeStyle(
                 LinearGradient(
                     colors: [
-                        Color(red: 0.54, green: 0.91, blue: 0.94),
-                        Color(red: 0.28, green: 0.77, blue: 0.85),
-                        Color(red: 0.10, green: 0.47, blue: 0.62)
+                        SettingsPalette.cyanFill.opacity(0.94),
+                        SettingsPalette.cyanFillDark.opacity(0.98)
                     ],
-                    startPoint: .top,
-                    endPoint: .bottom
+                    startPoint: .trailing,
+                    endPoint: .leading
                 )
             )
         case .weekly:
             return AnyShapeStyle(
                 LinearGradient(
                     colors: [
-                        Color(red: 0.84, green: 0.76, blue: 0.99),
-                        Color(red: 0.68, green: 0.54, blue: 0.95),
-                        Color(red: 0.41, green: 0.35, blue: 0.82)
+                        SettingsPalette.purpleFill.opacity(0.94),
+                        SettingsPalette.purpleFillDark.opacity(0.98)
                     ],
-                    startPoint: .top,
-                    endPoint: .bottom
+                    startPoint: .trailing,
+                    endPoint: .leading
                 )
             )
         }
@@ -2229,53 +2378,40 @@ enum UsageAccentStyle {
     var chipFill: AnyShapeStyle {
         switch self {
         case .current:
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.13, green: 0.34, blue: 0.39).opacity(0.92),
-                        Color(red: 0.08, green: 0.22, blue: 0.28).opacity(0.92)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
+            return AnyShapeStyle(SettingsPalette.cyanChip)
         case .weekly:
-            return AnyShapeStyle(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.29, green: 0.20, blue: 0.39).opacity(0.92),
-                        Color(red: 0.18, green: 0.12, blue: 0.28).opacity(0.92)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
+            return AnyShapeStyle(SettingsPalette.purpleChip)
         }
     }
 
     var textColor: Color {
         switch self {
         case .current:
-            return Color(red: 0.26, green: 0.88, blue: 0.92)
+            return SettingsPalette.cyanText
         case .weekly:
-            return Color(red: 0.76, green: 0.53, blue: 0.95)
+            return SettingsPalette.purpleText
         }
     }
 
     var chipBorder: Color {
-        Color.white.opacity(0.10)
+        switch self {
+        case .current:
+            return SettingsPalette.cyanChipBorder
+        case .weekly:
+            return SettingsPalette.purpleChipBorder
+        }
     }
 
     var highlightBorder: Color {
-        Color.white.opacity(0.22)
+        SettingsPalette.borderStrong
     }
 
     var shadowColor: Color {
         switch self {
         case .current:
-            return Color(red: 0.13, green: 0.58, blue: 0.72).opacity(0.35)
+            return SettingsPalette.cyanFill.opacity(0.16)
         case .weekly:
-            return Color(red: 0.43, green: 0.31, blue: 0.78).opacity(0.35)
+            return SettingsPalette.purpleFill.opacity(0.16)
         }
     }
 }
@@ -2342,9 +2478,126 @@ struct ResetBadge: View {
 
 struct AppSurfaceBackground: View {
     var body: some View {
-        Color(nsColor: .windowBackgroundColor)
-            .overlay(.thinMaterial.opacity(0.35))
+        LinearGradient(
+            colors: [
+                SettingsPalette.pageTop,
+                SettingsPalette.pageBottom
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .overlay(
+            RadialGradient(
+                colors: [
+                    SettingsPalette.pageGlow,
+                    .clear
+                ],
+                center: .topTrailing,
+                startRadius: 20,
+                endRadius: 260
+            )
+        )
             .ignoresSafeArea()
+    }
+}
+
+private enum SettingsPalette {
+    static let pageTop = adaptiveColor(light: NSColor(red: 0.97, green: 0.96, blue: 0.94, alpha: 1), dark: NSColor(red: 0.07, green: 0.09, blue: 0.12, alpha: 1))
+    static let pageBottom = adaptiveColor(light: NSColor(red: 0.92, green: 0.90, blue: 0.86, alpha: 1), dark: NSColor(red: 0.04, green: 0.05, blue: 0.07, alpha: 1))
+    static let pageGlow = adaptiveColor(light: NSColor(red: 0.38, green: 0.63, blue: 0.94, alpha: 0.14), dark: NSColor(red: 0.12, green: 0.22, blue: 0.31, alpha: 0.28))
+    static let surface = adaptiveColor(light: NSColor(red: 1.00, green: 1.00, blue: 1.00, alpha: 0.84), dark: NSColor(red: 0.12, green: 0.14, blue: 0.17, alpha: 0.96))
+    static let surfaceRaised = adaptiveColor(light: NSColor(red: 0.98, green: 0.98, blue: 0.99, alpha: 0.94), dark: NSColor(red: 0.14, green: 0.16, blue: 0.19, alpha: 0.96))
+    static let surfaceShell = adaptiveColor(light: NSColor(red: 1.00, green: 1.00, blue: 1.00, alpha: 0.74), dark: NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 0.88))
+    static let border = adaptiveColor(light: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 0.10), dark: NSColor.white.withAlphaComponent(0.08))
+    static let borderStrong = adaptiveColor(light: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 0.14), dark: NSColor.white.withAlphaComponent(0.10))
+    static let divider = adaptiveColor(light: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 0.10), dark: NSColor.white.withAlphaComponent(0.07))
+    static let buttonSurface = adaptiveColor(light: NSColor(red: 0.95, green: 0.96, blue: 0.98, alpha: 0.96), dark: NSColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 0.96))
+    static let inputSurface = adaptiveColor(light: NSColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 0.94), dark: NSColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 0.96))
+    static let inputFocusBorder = adaptiveColor(light: NSColor(red: 0.14, green: 0.37, blue: 0.74, alpha: 0.36), dark: NSColor(red: 0.50, green: 0.70, blue: 1.00, alpha: 0.40))
+    static let trackTop = adaptiveColor(light: NSColor(red: 0.95, green: 0.96, blue: 0.98, alpha: 0.96), dark: NSColor.white.withAlphaComponent(0.05))
+    static let trackBottom = adaptiveColor(light: NSColor(red: 0.84, green: 0.87, blue: 0.91, alpha: 0.92), dark: NSColor.black.withAlphaComponent(0.24))
+    static let trackBorder = adaptiveColor(light: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 0.10), dark: NSColor.white.withAlphaComponent(0.08))
+    static let iconTrack = adaptiveColor(light: NSColor(red: 0.22, green: 0.26, blue: 0.33, alpha: 0.18), dark: NSColor.white.withAlphaComponent(0.16))
+    static let iconTrackMuted = adaptiveColor(light: NSColor(red: 0.22, green: 0.26, blue: 0.33, alpha: 0.22), dark: NSColor.white.withAlphaComponent(0.22))
+    static let iconTrackBorder = adaptiveColor(light: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 0.10), dark: NSColor.white.withAlphaComponent(0.08))
+    static let accentBorder = adaptiveColor(light: NSColor.white.withAlphaComponent(0.34), dark: NSColor.white.withAlphaComponent(0.18))
+    static let onAccentText = adaptiveColor(light: NSColor.white.withAlphaComponent(0.98), dark: NSColor.white.withAlphaComponent(0.94))
+    static let knobOn = adaptiveColor(light: NSColor.white.withAlphaComponent(0.98), dark: NSColor.white.withAlphaComponent(0.96))
+    static let knobOff = adaptiveColor(light: NSColor(red: 0.99, green: 0.99, blue: 1.00, alpha: 1), dark: NSColor.white.withAlphaComponent(0.86))
+
+    static let blueFill = Color(red: 0.28, green: 0.56, blue: 0.93)
+    static let blueFillDark = Color(red: 0.14, green: 0.37, blue: 0.74)
+    static let blueButtonSurface = adaptiveColor(light: NSColor(red: 0.87, green: 0.92, blue: 0.98, alpha: 1), dark: NSColor(red: 0.16, green: 0.24, blue: 0.35, alpha: 1))
+    static let blueButtonSurfaceHover = adaptiveColor(light: NSColor(red: 0.82, green: 0.89, blue: 0.97, alpha: 1), dark: NSColor(red: 0.18, green: 0.28, blue: 0.41, alpha: 1))
+    static let blueToggleSurface = adaptiveColor(light: NSColor(red: 0.72, green: 0.82, blue: 0.94, alpha: 1), dark: NSColor(red: 0.20, green: 0.32, blue: 0.48, alpha: 1))
+    static let blueAccentIconSurface = adaptiveColor(light: NSColor(red: 0.87, green: 0.92, blue: 0.98, alpha: 1), dark: NSColor(red: 0.13, green: 0.23, blue: 0.36, alpha: 1))
+    static let blueText = adaptiveColor(light: NSColor(red: 0.13, green: 0.34, blue: 0.63, alpha: 1), dark: NSColor(red: 0.84, green: 0.92, blue: 1.00, alpha: 1))
+    static let actionButtonSurface = adaptiveColor(light: NSColor(red: 0.90, green: 0.94, blue: 0.98, alpha: 1), dark: NSColor(red: 0.15, green: 0.21, blue: 0.29, alpha: 1))
+    static let actionButtonSurfaceHover = adaptiveColor(light: NSColor(red: 0.85, green: 0.91, blue: 0.97, alpha: 1), dark: NSColor(red: 0.17, green: 0.25, blue: 0.35, alpha: 1))
+    static let actionBorder = adaptiveColor(light: NSColor(red: 0.14, green: 0.37, blue: 0.62, alpha: 0.18), dark: NSColor(red: 0.58, green: 0.74, blue: 0.92, alpha: 0.18))
+    static let actionText = adaptiveColor(light: NSColor(red: 0.12, green: 0.34, blue: 0.58, alpha: 1), dark: NSColor(red: 0.74, green: 0.86, blue: 0.98, alpha: 1))
+
+    static let greenFill = Color(red: 0.25, green: 0.58, blue: 0.39)
+    static let greenFillDark = Color(red: 0.16, green: 0.41, blue: 0.27)
+    static let greenButtonSurface = adaptiveColor(light: NSColor(red: 0.88, green: 0.94, blue: 0.90, alpha: 1), dark: NSColor(red: 0.15, green: 0.25, blue: 0.19, alpha: 1))
+    static let successButtonSurface = adaptiveColor(light: NSColor(red: 0.89, green: 0.94, blue: 0.91, alpha: 1), dark: NSColor(red: 0.14, green: 0.24, blue: 0.18, alpha: 1))
+    static let successBorder = adaptiveColor(light: NSColor(red: 0.18, green: 0.49, blue: 0.31, alpha: 0.18), dark: NSColor(red: 0.48, green: 0.78, blue: 0.58, alpha: 0.16))
+    static let successText = adaptiveColor(light: NSColor(red: 0.12, green: 0.38, blue: 0.24, alpha: 1), dark: NSColor(red: 0.70, green: 0.90, blue: 0.76, alpha: 1))
+    static let redFill = Color(red: 0.74, green: 0.35, blue: 0.38)
+    static let redFillDark = Color(red: 0.52, green: 0.21, blue: 0.23)
+    static let redButtonSurface = adaptiveColor(light: NSColor(red: 0.97, green: 0.90, blue: 0.90, alpha: 1), dark: NSColor(red: 0.32, green: 0.17, blue: 0.18, alpha: 1))
+    static let destructiveButtonSurface = adaptiveColor(light: NSColor(red: 0.97, green: 0.90, blue: 0.90, alpha: 1), dark: NSColor(red: 0.30, green: 0.16, blue: 0.17, alpha: 1))
+    static let destructiveBorder = adaptiveColor(light: NSColor(red: 0.62, green: 0.26, blue: 0.29, alpha: 0.18), dark: NSColor(red: 0.92, green: 0.52, blue: 0.56, alpha: 0.16))
+    static let destructiveText = adaptiveColor(light: NSColor(red: 0.55, green: 0.20, blue: 0.23, alpha: 1), dark: NSColor(red: 0.96, green: 0.70, blue: 0.72, alpha: 1))
+
+    static let cyanFill = Color(red: 0.26, green: 1.00, blue: 0.89)
+    static let cyanFillDark = Color(red: 0.13, green: 0.57, blue: 0.71)
+    static let cyanChip = adaptiveColor(light: NSColor(red: 0.06, green: 0.58, blue: 0.68, alpha: 0.08), dark: NSColor(red: 0.06, green: 0.58, blue: 0.68, alpha: 0.14))
+    static let cyanChipBorder = adaptiveColor(light: NSColor(red: 0.06, green: 0.58, blue: 0.68, alpha: 0.16), dark: NSColor(red: 0.31, green: 0.88, blue: 0.94, alpha: 0.18))
+    static let cyanText = adaptiveColor(light: NSColor(red: 0.06, green: 0.39, blue: 0.49, alpha: 1), dark: NSColor(red: 0.50, green: 0.88, blue: 0.94, alpha: 1))
+
+    static let purpleFill = Color(red: 0.79, green: 0.67, blue: 1.00)
+    static let purpleFillDark = Color(red: 0.36, green: 0.30, blue: 0.80)
+    static let purpleAccentIconSurface = adaptiveColor(light: NSColor(red: 0.92, green: 0.89, blue: 0.98, alpha: 1), dark: NSColor(red: 0.24, green: 0.18, blue: 0.34, alpha: 1))
+    static let purpleChip = adaptiveColor(light: NSColor(red: 0.49, green: 0.34, blue: 0.72, alpha: 0.08), dark: NSColor(red: 0.49, green: 0.34, blue: 0.72, alpha: 0.14))
+    static let purpleChipBorder = adaptiveColor(light: NSColor(red: 0.49, green: 0.34, blue: 0.72, alpha: 0.16), dark: NSColor(red: 0.80, green: 0.68, blue: 0.94, alpha: 0.18))
+    static let purpleText = adaptiveColor(light: NSColor(red: 0.34, green: 0.22, blue: 0.60, alpha: 1), dark: NSColor(red: 0.80, green: 0.68, blue: 0.94, alpha: 1))
+
+    static let orangeFill = Color(red: 0.87, green: 0.46, blue: 0.33)
+    static let orangeFillDark = Color(red: 0.66, green: 0.27, blue: 0.18)
+}
+
+private enum SettingsAccentTint {
+    case blue
+    case purple
+}
+
+private struct SettingsAccentIcon: View {
+    let systemName: String
+    let tint: SettingsAccentTint
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(backgroundFill)
+                .frame(width: 36, height: 36)
+                .overlay(
+                    Circle()
+                        .stroke(SettingsPalette.border, lineWidth: 1)
+                )
+
+            Image(systemName: systemName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(foregroundColor)
+        }
+    }
+
+    private var backgroundFill: some ShapeStyle {
+        tint == .blue ? SettingsPalette.blueAccentIconSurface : SettingsPalette.purpleAccentIconSurface
+    }
+
+    private var foregroundColor: Color {
+        tint == .blue ? SettingsPalette.blueText : SettingsPalette.purpleText
     }
 }
 
@@ -2359,12 +2612,49 @@ private extension ServiceLimit {
 
 private extension View {
     func limitCard() -> some View {
-        background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        background(SettingsPalette.surfaceShell, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(.separator.opacity(0.4), lineWidth: 1)
+                    .stroke(SettingsPalette.borderStrong, lineWidth: 1)
             )
     }
+
+    func settingsCardSurface(cornerRadius: CGFloat, fill: Color = SettingsPalette.surface) -> some View {
+        background(fill, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(SettingsPalette.border, lineWidth: 1)
+            )
+    }
+}
+
+private struct DashboardActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.callout.weight(.semibold))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(configuration.isPressed ? SettingsPalette.surfaceRaised : SettingsPalette.buttonSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(SettingsPalette.border, lineWidth: 1)
+            )
+            .foregroundStyle(.primary)
+    }
+}
+
+private func adaptiveColor(light: NSColor, dark: NSColor) -> Color {
+    Color(nsColor: NSColor(name: nil) { appearance in
+        switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
+        case .darkAqua:
+            return dark
+        default:
+            return light
+        }
+    })
 }
 
 #Preview {

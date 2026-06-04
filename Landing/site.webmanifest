@@ -1,6 +1,6 @@
 {
-  "name": "Limit Bar",
-  "short_name": "Limit Bar",
+  "name": "MyWebSite",
+  "short_name": "MySite",
   "icons": [
     {
       "src": "/web-app-manifest-192x192.png",
@@ -15,8 +15,7 @@
       "purpose": "maskable"
     }
   ],
-  "theme_color": "#080b10",
-  "background_color": "#080b10",
-  "display": "standalone",
-  "start_url": "/"
+  "theme_color": "#ffffff",
+  "background_color": "#ffffff",
+  "display": "standalone"
 }
