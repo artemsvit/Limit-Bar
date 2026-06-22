@@ -51,9 +51,10 @@ enum ConnectionState: String, Codable, Equatable {
 enum LimitService: String, CaseIterable, Codable, Identifiable {
     case codex = "Codex"
     case claude = "Claude Code"
+    case antigravity = "Antigravity"
     case gemini = "Gemini"
 
-    static let activeCases: [LimitService] = [.codex, .claude]
+    static let activeCases: [LimitService] = [.codex, .claude, .antigravity]
 
     var id: String { rawValue }
 
@@ -65,6 +66,7 @@ enum LimitService: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .codex: return "CodexIcon"
         case .claude: return "ClaudeCodeIcon"
+        case .antigravity: return "GeminiIcon"
         case .gemini: return "GeminiIcon"
         }
     }
@@ -73,6 +75,7 @@ enum LimitService: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .codex: return "Codex"
         case .claude: return "Claude"
+        case .antigravity: return "Antigravity"
         case .gemini: return "Gemini"
         }
     }
@@ -359,7 +362,11 @@ final class LimitStore: ObservableObject {
                     setState(.failed, for: service, error: error.localizedDescription)
                 }
                 if presentErrors {
-                    ErrorAlertPresenter.show(message: error.localizedDescription)
+                    if service == .antigravity, AntigravityCLIConnector.isLoginError(error.localizedDescription) {
+                        AntigravityAuthPresenter.show(message: error.localizedDescription)
+                    } else {
+                        ErrorAlertPresenter.show(message: error.localizedDescription)
+                    }
                 }
             }
         }
@@ -449,6 +456,8 @@ enum ProviderConnector {
             return try await CodexCLIConnector.fetch()
         case .claude:
             return try await ClaudeCLIConnector.fetch()
+        case .antigravity:
+            return try await AntigravityCLIConnector.fetch()
         case .gemini:
             return try await GeminiCLIConnector.fetch()
         }
@@ -807,6 +816,140 @@ struct GeminiCLIConnector {
     }
 }
 
+struct AntigravityCLIConnector {
+    static func fetch() async throws -> ProviderSnapshot {
+        let binary = try await resolveBinary()
+        let result = try await ProcessRunner.run(
+            executable: "/usr/bin/env",
+            arguments: [binary, "models"],
+            input: nil,
+            timeout: 14
+        )
+
+        let output = [result.stdout, result.stderr].joined(separator: "\n")
+        guard result.status == 0 || !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            await openAntigravityLogin(binary: binary)
+            throw ConnectorError.message(loginMessage)
+        }
+
+        if requiresUpdate(output) {
+            throw ConnectorError.message("Antigravity CLI needs an update before limits can be read. Run `agy update`, sign in with Google again if prompted, then retry.")
+        }
+
+        if isUnauthenticated(output) {
+            await openAntigravityLogin(binary: binary)
+            throw ConnectorError.message(loginMessage)
+        }
+
+        guard result.status == 0, hasModelList(output) else {
+            throw ConnectorError.message(cleanError(output, fallback: "Antigravity CLI did not return model access. Run `agy` in Terminal, complete Google OAuth login, then retry."))
+        }
+
+        let accountDetail = latestAuthenticatedEmail().map { " Signed in as \($0)." } ?? ""
+        throw ConnectorError.message(
+            "Antigravity CLI is authenticated\(accountDetail) However, Antigravity CLI 1.0.10 does not expose current or weekly usage limits in a readable command. `/usage` and `/quota` are not available in this installed CLI, so Limit Bar cannot show Antigravity limits yet."
+        )
+    }
+
+    private static func resolveBinary() async throws -> String {
+        for candidate in ["agy", "antigravity"] {
+            let result = try await ProcessRunner.run(
+                executable: "/usr/bin/env",
+                arguments: ["which", candidate],
+                input: nil,
+                timeout: 4
+            )
+            let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if result.status == 0, !path.isEmpty {
+                return path
+            }
+        }
+
+        throw ConnectorError.message("Antigravity CLI not found. Install Antigravity, sign in with Google, then retry.")
+    }
+
+    static func isLoginError(_ output: String) -> Bool {
+        isUnauthenticated(output)
+    }
+
+    private static func isUnauthenticated(_ output: String) -> Bool {
+        let clean = output.strippingANSI().lowercased()
+        return clean.contains("not authenticated") ||
+            clean.contains("not logged in") ||
+            clean.contains("not logged into antigravity") ||
+            clean.contains("please login") ||
+            clean.contains("please log in") ||
+            clean.contains("sign in") ||
+            clean.contains("log in again") ||
+            clean.contains("login with google") ||
+            clean.contains("google account") ||
+            clean.contains("unauthorized") ||
+            clean.contains("401")
+    }
+
+    private static func requiresUpdate(_ output: String) -> Bool {
+        let clean = output.strippingANSI().lowercased()
+        return clean.contains("no longer supported") ||
+            clean.contains("agy update") ||
+            clean.contains("please update")
+    }
+
+    private static func hasModelList(_ output: String) -> Bool {
+        output
+            .split(whereSeparator: \.isNewline)
+            .contains { $0.localizedCaseInsensitiveContains("Gemini") || $0.localizedCaseInsensitiveContains("Claude") || $0.localizedCaseInsensitiveContains("GPT") }
+    }
+
+    private static var loginMessage: String {
+        "Antigravity is not logged in for CLI access. Run `agy` in Terminal, press Enter to open Google OAuth, paste the browser code back into the CLI, then retry Connect."
+    }
+
+    private static func openAntigravityLogin(binary: String) async {
+        _ = try? await ProcessRunner.run(
+            executable: "/usr/bin/osascript",
+            arguments: [
+                "-e",
+                """
+                tell application "Terminal"
+                    activate
+                    do script "\(binary.shellQuoted)"
+                end tell
+                """
+            ],
+            input: nil,
+            timeout: 4
+        )
+    }
+
+    private static func latestAuthenticatedEmail() -> String? {
+        let logDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/antigravity-cli/log", isDirectory: true)
+
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: logDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        let sortedLogs = urls
+            .filter { $0.pathExtension == "log" }
+            .sorted { lhs, rhs in
+                let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhsDate > rhsDate
+            }
+
+        for url in sortedLogs.prefix(8) {
+            guard let text = try? String(contentsOf: url, encoding: .utf8),
+                  let email = text.matches(pattern: #"applyAuthResult:\s+email=([^,\s]+)"#).last,
+                  !email.isEmpty else { continue }
+            return email
+        }
+
+        return nil
+    }
+}
+
 struct ProcessRunner {
     struct Result {
         let stdout: String
@@ -1051,7 +1194,7 @@ struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Connect services")
                         .font(.system(size: 30, weight: .semibold, design: .rounded))
-                    Text("Limit Bar reads installed Codex and Claude Code sessions. No passwords, no browser cookies, no fake balances.")
+                    Text("Limit Bar reads installed Codex, Claude Code, and Google Antigravity sessions. No passwords, no browser cookies, no fake balances.")
                         .font(.body)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1064,7 +1207,7 @@ struct OnboardingView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    SetupPromiseRow(symbol: "terminal", title: "Uses local tools", text: "Codex uses `codex app-server`; Claude Code tries the installed `claude` CLI usage view.")
+                    SetupPromiseRow(symbol: "terminal", title: "Uses local tools", text: "Codex uses `codex app-server`; Claude Code and Antigravity use their installed CLIs.")
                     SetupPromiseRow(symbol: "clock", title: "Reset-first layout", text: "Current and weekly reset times stay visible before every long session.")
                     SetupPromiseRow(symbol: "lock", title: "Low-permission first", text: "Browser cookies and Keychain access are intentionally not part of this first connector pass.")
                 }
@@ -1685,7 +1828,7 @@ struct MenuSetupView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                SetupPromiseRow(symbol: "terminal", title: "Local tools", text: "Uses your installed Codex and Claude Code sessions.")
+                SetupPromiseRow(symbol: "terminal", title: "Local tools", text: "Uses your installed Codex, Claude Code, and Antigravity sessions.")
                 SetupPromiseRow(symbol: "clock", title: "Reset first", text: "Shows current and weekly reset times.")
                 SetupPromiseRow(symbol: "lock", title: "No passwords", text: "No browser cookies or passwords in this first pass.")
             }
@@ -1790,6 +1933,18 @@ private func shortProviderError(_ service: ServiceLimit) -> String {
         }
         if lower.contains("timed out") {
             return "Claude did not respond"
+        }
+    }
+
+    if service.id == .antigravity {
+        if lower.contains("update") || lower.contains("no longer supported") {
+            return "Update required"
+        }
+        if lower.contains("google login") || lower.contains("google account") || lower.contains("sign in") || lower.contains("login") {
+            return "Google sign-in required"
+        }
+        if lower.contains("usage limits") || lower.contains("/usage") || lower.contains("quota") {
+            return "Usage limits unavailable"
         }
     }
 
@@ -2276,7 +2431,7 @@ enum ErrorAlertPresenter {
         alert.runModal()
     }
 
-    private static func appAlertIcon() -> NSImage? {
+    static func appAlertIcon() -> NSImage? {
         guard let baseImage = NSApp.applicationIconImage ?? NSImage(named: "AppLogo") else {
             return nil
         }
@@ -2295,6 +2450,36 @@ enum ErrorAlertPresenter {
         baseImage.draw(in: rect)
 
         return image
+    }
+}
+
+@MainActor
+enum AntigravityAuthPresenter {
+    static func show(message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Connect Antigravity CLI"
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.icon = ErrorAlertPresenter.appAlertIcon()
+        alert.addButton(withTitle: "Open CLI Login")
+        alert.addButton(withTitle: "OK")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            openAntigravityCLI()
+        }
+    }
+
+    private static func openAntigravityCLI() {
+        let script = """
+        tell application "Terminal"
+            activate
+            do script "agy"
+        end tell
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
     }
 }
 
