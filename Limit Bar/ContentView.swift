@@ -1082,6 +1082,14 @@ private func clampPercent(_ value: Int) -> Int {
 
 private func cleanError(_ stderr: String, fallback: String) -> String {
     let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+    let lower = trimmed.lowercased()
+
+    if lower.contains("@openai/codex") &&
+        lower.contains("enoent") &&
+        lower.contains("spawn") {
+        return "Codex CLI is installed, but its native executable is missing. Reinstall or update Codex with `npm install -g @openai/codex@latest`, then retry Connect."
+    }
+
     return trimmed.isEmpty ? fallback : trimmed
 }
 
