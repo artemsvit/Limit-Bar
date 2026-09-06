@@ -149,6 +149,29 @@
             Download for macOS
           </a>
         </div>
+        <div class="hero-support" aria-label="Limit Bar details">
+          <div class="hero-meta">
+            <span>No login required</span>
+            <span class="meta-dot" aria-hidden="true"></span>
+            <span>Uses local CLI sessions</span>
+          </div>
+
+          <div class="provider-strip" aria-label="Supported providers">
+            <span class="provider-label">Built for</span>
+            <div>
+              <img src="assets/codex.png" alt="" width="28" height="28">
+              <span>Codex</span>
+            </div>
+            <div>
+              <img src="assets/claude-code.png" alt="" width="28" height="28">
+              <span>Claude Code</span>
+            </div>
+            <div>
+              <img src="assets/antigravity.png" alt="" width="28" height="28">
+              <span>Antigravity</span>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="hero-visual" aria-label="Limit Bar interface preview">
@@ -188,29 +211,6 @@
         </div>
       </div>
 
-      <div class="hero-copy hero-copy-bottom">
-        <div class="hero-meta">
-          <span>No login required</span>
-          <span class="meta-dot" aria-hidden="true"></span>
-          <span>Uses local CLI sessions</span>
-        </div>
-
-        <div class="provider-strip" aria-label="Supported providers">
-          <span class="provider-label">Built for</span>
-          <div>
-            <img src="assets/codex.png" alt="" width="28" height="28">
-            <span>Codex</span>
-          </div>
-          <div>
-            <img src="assets/claude-code.png" alt="" width="28" height="28">
-            <span>Claude Code</span>
-          </div>
-          <div>
-            <img src="assets/antigravity.png" alt="" width="28" height="28">
-            <span>Antigravity</span>
-          </div>
-        </div>
-      </div>
     </section>
 
     <section class="section-intro" id="features">
@@ -348,12 +348,14 @@
   </main>
 
   <footer>
-    <span translate="no">Limit Bar by <a href="https://artsvit.com" target="_blank" rel="noopener noreferrer">Artem Svitelskyi</a></span>
-    <a href="https://github.com/artemsvit/Limit-Bar" target="_blank" rel="noopener noreferrer">
-      <i data-lucide="github" aria-hidden="true"></i>
-      GitHub
-    </a>
-    <a href="/releases/">Release notes</a>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="https://github.com/artemsvit/Limit-Bar" target="_blank" rel="noopener noreferrer">
+        <i data-lucide="github" aria-hidden="true"></i>
+        GitHub
+      </a>
+      <a href="/releases/">Release notes</a>
+    </nav>
+    <span class="footer-credit" translate="no">Limit Bar by <a href="https://artsvit.com" target="_blank" rel="noopener noreferrer">Artem Svitelskyi</a></span>
   </footer>
 
   <script src="https://unpkg.com/lucide@0.542.0/dist/umd/lucide.min.js"></script>

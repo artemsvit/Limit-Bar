@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Limit Bar — Release History</title>
-  <meta name="description" content="Release history and update notes for Limit Bar.">
+  <title>Limit Bar — Release Notes</title>
+  <meta name="description" content="Release notes and product updates for Limit Bar.">
   <link rel="canonical" href="https://limitbar.artsvit.com/releases/">
   <link rel="stylesheet" href="../styles.css">
 </head>
@@ -20,28 +20,62 @@
   </header>
 
   <main class="release-shell">
-    <section class="release-card release-history-card">
+    <section class="release-card release-notes-card">
       <p class="eyebrow">Limit Bar updates</p>
-      <h1>Release history</h1>
-      <p class="release-lede">A clear record of the features, fixes, and provider support added to Limit Bar.</p>
-      <p class="release-latest-label">Latest release</p>
+      <h1>Release notes</h1>
+      <p class="release-lede">Every shipped improvement, in one place.</p>
 
-      <div class="release-list">
-        <a class="release-list-item release-list-item-latest" href="./Limit-Bar-1.0.6.html">
-          <span><strong>Limit Bar 1.0.6</strong><small>Multiple providers, clearer menu bar summaries, provider detection improvements.</small></span>
-          <span aria-hidden="true">→</span>
-        </a>
-        <a class="release-list-item" href="https://github.com/artemsvit/Limit-Bar/releases/tag/v1.0.5" target="_blank" rel="noopener noreferrer">
-          <span><strong>Limit Bar 1.0.5</strong><small>Settings refinement, percentage mode, Claude Code usage detection.</small></span>
-          <span aria-hidden="true">→</span>
-        </a>
-      </div>
+      <article class="release-entry release-entry-latest" id="v1-0-6">
+        <div class="release-entry-heading">
+          <div>
+            <p class="release-entry-kicker">Latest · September 2026</p>
+            <h2>Limit Bar 1.0.6</h2>
+          </div>
+          <a class="release-permalink" href="#v1-0-6" aria-label="Link to Limit Bar 1.0.6 release notes">#</a>
+        </div>
+        <p class="release-entry-summary">A clearer menu bar for people using more than one AI provider.</p>
+        <div class="release-provider-row" aria-label="Supported providers">
+          <span>Codex</span>
+          <span>Claude Code</span>
+          <span>Antigravity</span>
+        </div>
+        <ul class="detail-list">
+          <li>See multiple providers in the menu bar, for example <code>Cx:0% Ag:100%</code>.</li>
+          <li>When percentage mode is off, each provider gets its own current and weekly bar pair.</li>
+          <li>Antigravity usage now reads quota data from its current <code>/usage</code> command.</li>
+          <li>Claude Code limit detection and connection messages are more reliable.</li>
+          <li>Settings, notifications, thresholds, update controls, and the app footer were refined.</li>
+        </ul>
+        <div class="release-entry-actions">
+          <a class="primary-button" href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.6/Limit-Bar-1.0.6.dmg" target="_blank" rel="noopener noreferrer">Download latest</a>
+          <a class="header-link" href="https://github.com/artemsvit/Limit-Bar/releases/tag/v1.0.6" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+        </div>
+      </article>
+
+      <article class="release-entry" id="v1-0-5">
+        <div class="release-entry-heading">
+          <div>
+            <p class="release-entry-kicker">Earlier release</p>
+            <h2>Limit Bar 1.0.5</h2>
+          </div>
+          <a class="release-permalink" href="#v1-0-5" aria-label="Link to Limit Bar 1.0.5 release notes">#</a>
+        </div>
+        <p class="release-entry-summary">A focused refinement pass for settings and usage summaries.</p>
+        <ul class="detail-list">
+          <li>Refined settings controls and percentage mode.</li>
+          <li>Improved Claude Code usage detection.</li>
+          <li>Polished the menu bar and notification experience.</li>
+        </ul>
+      </article>
     </section>
   </main>
 
   <footer>
-    <span translate="no">Limit Bar by <a href="https://artsvit.com" target="_blank" rel="noopener noreferrer">Artem Svitelskyi</a></span>
-    <a href="../">Back to Limit Bar</a>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="https://github.com/artemsvit/Limit-Bar" target="_blank" rel="noopener noreferrer">GitHub</a>
+      <span class="footer-current" aria-current="page">Release notes</span>
+    </nav>
+    <span class="footer-credit" translate="no">Limit Bar by <a href="https://artsvit.com" target="_blank" rel="noopener noreferrer">Artem Svitelskyi</a></span>
   </footer>
 </body>
 </html>
