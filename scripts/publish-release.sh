@@ -12,6 +12,7 @@ SPARKLE_ACCOUNT="limit-bar"
 FEED_TAG="updates"
 SPARKLE_FEED_URL="https://github.com/${REPO}/releases/download/${FEED_TAG}/appcast.xml"
 SPARKLE_PUBLIC_ED_KEY="96VpvrwjTO2r7k7pmBJdFzPVvDeYPbO+uXpPqEuoXzU="
+PUBLIC_RELEASE_NOTES_URL_PREFIX="https://limitbar.artsvit.com/releases/"
 
 VERSION="${1:-}"
 BUILD="${2:-}"
@@ -35,7 +36,8 @@ EXPORT_DIR="$ARCHIVE_ROOT/export"
 UPDATES_DIR="$ARCHIVE_ROOT/updates"
 ZIP_NAME="Limit-Bar-${VERSION}.zip"
 ZIP_PATH="$UPDATES_DIR/$ZIP_NAME"
-NOTES_PATH="$UPDATES_DIR/Limit-Bar-${VERSION}.md"
+RELEASE_BODY_PATH="$UPDATES_DIR/Limit-Bar-${VERSION}.md"
+NOTES_PATH="$UPDATES_DIR/Limit-Bar-${VERSION}.html"
 APPCAST_PATH="$UPDATES_DIR/appcast.xml"
 
 rm -rf "$ARCHIVE_ROOT"
@@ -84,28 +86,41 @@ fi
 
 ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
-cat > "$NOTES_PATH" <<EOF
+RELEASE_BODY_SOURCE="$ROOT_DIR/docs/releases/Limit-Bar-${VERSION}.md"
+if [[ -f "$RELEASE_BODY_SOURCE" ]]; then
+  cp "$RELEASE_BODY_SOURCE" "$RELEASE_BODY_PATH"
+else
+  cat > "$RELEASE_BODY_PATH" <<EOF
 # ${RELEASE_NAME}
 
 Release ${VERSION} (${BUILD}).
 EOF
+fi
+
+RELEASE_PAGE_SOURCE="$ROOT_DIR/Landing/releases/Limit-Bar-${VERSION}.html"
+if [[ ! -f "$RELEASE_PAGE_SOURCE" ]]; then
+  echo "Missing public release page: $RELEASE_PAGE_SOURCE"
+  exit 67
+fi
+cp "$RELEASE_PAGE_SOURCE" "$NOTES_PATH"
 
 RELEASE_ASSET_PREFIX="https://github.com/${REPO}/releases/download/${TAG}/"
 
 printf '%s' "$SPARKLE_PRIVATE_KEY" | Vendor/Sparkle/bin/generate_appcast \
   --ed-key-file - \
   --download-url-prefix "$RELEASE_ASSET_PREFIX" \
-  --release-notes-url-prefix "$RELEASE_ASSET_PREFIX" \
+  --release-notes-url-prefix "$PUBLIC_RELEASE_NOTES_URL_PREFIX" \
   --maximum-versions 1 \
   "$UPDATES_DIR"
 
 gh release create "$TAG" \
   "$ZIP_PATH" \
+  "$RELEASE_BODY_PATH" \
   "$NOTES_PATH" \
   "$APPCAST_PATH" \
   --repo "$REPO" \
   --title "$RELEASE_NAME" \
-  --notes-file "$NOTES_PATH"
+  --notes-file "$RELEASE_BODY_PATH"
 
 if ! gh release view "$FEED_TAG" --repo "$REPO" >/dev/null 2>&1; then
   gh release create "$FEED_TAG" \

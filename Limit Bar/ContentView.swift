@@ -79,6 +79,15 @@ enum LimitService: String, CaseIterable, Codable, Identifiable {
         case .gemini: return "Gemini"
         }
     }
+
+    var menuBarAbbreviation: String {
+        switch self {
+        case .claude: return "Cl"
+        case .codex: return "Cx"
+        case .antigravity: return "Ag"
+        case .gemini: return "Ge"
+        }
+    }
 }
 
 struct NotificationPreferences: Codable, Equatable {
@@ -201,7 +210,7 @@ enum UsageNotificationCenter {
 
         let content = UNMutableNotificationContent()
         content.title = "Codex current is low"
-        content.body = "24% remaining, below your 25% threshold. Resets in 4 hours."
+        content.body = "24% remaining, resets in 4 hours."
         content.sound = .default
 
         let request = UNNotificationRequest(
@@ -254,7 +263,7 @@ enum UsageNotificationCenter {
     private static func deliverNotification(service: LimitService, kind: String, threshold: Int, current: LimitBalance) {
         let content = UNMutableNotificationContent()
         content.title = "\(service.shortName) \(kind.lowercased()) is low"
-        content.body = "\(current.remainingPercent)% remaining, below your \(threshold)% threshold. \(resetText(for: current.resetsAt))"
+        content.body = "\(current.remainingPercent)% remaining, \(resetText(for: current.resetsAt))"
         content.sound = .default
 
         let request = UNNotificationRequest(
@@ -268,7 +277,7 @@ enum UsageNotificationCenter {
     private static func resetText(for date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .full
-        return "Resets \(formatter.localizedString(for: date, relativeTo: Date()))."
+        return "resets \(formatter.localizedString(for: date, relativeTo: Date()))."
     }
 
     private static func notificationToken(service: LimitService, kind: String, threshold: Int, resetAt: Date) -> String {
@@ -620,8 +629,12 @@ struct ClaudeCLIConnector {
         let settingsData = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted])
         try settingsData.write(to: settingsURL)
 
+        // `rate_limits` is populated after Claude Code refreshes its subscription
+        // usage. Starting a TUI and immediately exiting only gives the status-line
+        // command session metadata, which is why `/usage`-style headless probes
+        // report session/API usage instead of the 5-hour and weekly limits.
         let script = """
-        ( sleep 4; printf '/exit\\r'; sleep 1 ) | /usr/bin/script -q /dev/null /usr/bin/env claude --settings \(settingsURL.path.shellQuoted)
+        ( sleep 2; printf '/usage\\r'; sleep 5; printf '\\033'; sleep 1; printf '/exit\\r'; sleep 1 ) | /usr/bin/script -q /dev/null /usr/bin/env claude --settings \(settingsURL.path.shellQuoted)
         """
 
         do {
@@ -629,7 +642,7 @@ struct ClaudeCLIConnector {
                 executable: "/bin/zsh",
                 arguments: ["-lc", script],
                 input: nil,
-                timeout: 14,
+                timeout: 18,
                 currentDirectory: probeDirectory
             )
         } catch {
@@ -659,6 +672,13 @@ struct ClaudeCLIConnector {
             output.localizedCaseInsensitiveContains("not logged in") {
             throw ConnectorError.message("Claude Code is not logged in for CLI access. Run `claude auth login` in Terminal, finish the browser login, then retry.")
         }
+
+        if let data = output.data(using: .utf8),
+           let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let provider = status["apiProvider"] as? String,
+           provider.localizedCaseInsensitiveCompare("firstParty") != .orderedSame {
+            throw ConnectorError.message("Claude Code is connected through an API or cloud provider account. Claude.ai 5-hour and weekly subscription limits are only available for first-party Claude.ai subscriptions.")
+        }
     }
 
     private static func parseStatusLine(_ output: String) throws -> ProviderSnapshot? {
@@ -679,19 +699,31 @@ struct ClaudeCLIConnector {
             fallbackReset: Date().addingTimeInterval(7 * 24 * 60 * 60)
         )
 
-        guard current != nil || weekly != nil else { return nil }
-        return ProviderSnapshot(current: current, weekly: weekly, credits: nil, accountEmail: nil, planName: "Claude")
+        // Some Claude Code builds expose the model-specific weekly bucket while
+        // the aggregate seven-day bucket is unavailable. It is still a useful,
+        // server-provided subscription limit, so show it instead of reporting
+        // that Claude is disconnected.
+        let weeklyFallback = weekly == nil
+            ? makeStatusLineBalance(
+                title: "Weekly Sonnet usage limit",
+                dictionary: rateLimits["seven_day_sonnet"] as? [String: Any],
+                fallbackReset: Date().addingTimeInterval(7 * 24 * 60 * 60)
+            )
+            : nil
+
+        guard current != nil || weekly != nil || weeklyFallback != nil else { return nil }
+        return ProviderSnapshot(current: current, weekly: weekly ?? weeklyFallback, credits: nil, accountEmail: nil, planName: "Claude")
     }
 
     private static func makeStatusLineBalance(title: String, dictionary: [String: Any]?, fallbackReset: Date) -> LimitBalance? {
         guard let dictionary,
-              let used = number(dictionary["used_percentage"] ?? dictionary["usedPercent"]) else { return nil }
+              let used = number(dictionary["used_percentage"] ?? dictionary["usedPercent"] ?? dictionary["utilization"]) else { return nil }
 
-        let resetDate = number(dictionary["resets_at"] ?? dictionary["resetsAt"])
-            .map { Date(timeIntervalSince1970: $0) } ?? fallbackReset
+        let resetDate = date(dictionary["resets_at"] ?? dictionary["resetsAt"]) ?? fallbackReset
+        let usedPercentage = used <= 1 ? used * 100 : used
         return LimitBalance(
             title: title,
-            remainingPercent: clampPercent(100 - Int(used.rounded())),
+            remainingPercent: clampPercent(100 - Int(usedPercentage.rounded())),
             resetsAt: resetDate
         )
     }
@@ -821,9 +853,14 @@ struct AntigravityCLIConnector {
         let binary = try await resolveBinary()
         let result = try await ProcessRunner.run(
             executable: "/usr/bin/env",
-            arguments: [binary, "models"],
+            arguments: [
+                binary,
+                "--print", "/usage",
+                "--output-format", "json",
+                "--print-timeout", "15s"
+            ],
             input: nil,
-            timeout: 14
+            timeout: 20
         )
 
         let output = [result.stdout, result.stderr].joined(separator: "\n")
@@ -832,23 +869,74 @@ struct AntigravityCLIConnector {
             throw ConnectorError.message(loginMessage)
         }
 
-        if requiresUpdate(output) {
-            throw ConnectorError.message("Antigravity CLI needs an update before limits can be read. Run `agy update`, sign in with Google again if prompted, then retry.")
-        }
-
         if isUnauthenticated(output) {
             await openAntigravityLogin(binary: binary)
             throw ConnectorError.message(loginMessage)
         }
 
-        guard result.status == 0, hasModelList(output) else {
-            throw ConnectorError.message(cleanError(output, fallback: "Antigravity CLI did not return model access. Run `agy` in Terminal, complete Google OAuth login, then retry."))
+        guard result.status == 0 else {
+            if requiresUpdate(output) {
+                throw ConnectorError.message("Antigravity CLI needs an update before limits can be read. Run `agy update`, sign in with Google again if prompted, then retry.")
+            }
+            throw ConnectorError.message(cleanError(output, fallback: "Antigravity CLI did not return usage data. Run `agy` in Terminal, complete Google OAuth login, then retry."))
         }
 
-        let accountDetail = latestAuthenticatedEmail().map { " Signed in as \($0)." } ?? ""
-        throw ConnectorError.message(
-            "Antigravity CLI is authenticated\(accountDetail) However, Antigravity CLI 1.0.10 does not expose current or weekly usage limits in a readable command. `/usage` and `/quota` are not available in this installed CLI, so Limit Bar cannot show Antigravity limits yet."
+        return try parseUsage(output)
+    }
+
+    private static func parseUsage(_ output: String) throws -> ProviderSnapshot {
+        let clean = output.strippingANSI()
+        guard let data = clean.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let command = root["command"] as? [String: Any],
+              let commandData = command["data"] as? [String: Any],
+              let groups = commandData["groups"] as? [[String: Any]] else {
+            throw ConnectorError.message("Antigravity CLI did not return quota data in a recognized format. Run `agy /usage` in Terminal, then retry.")
+        }
+
+        var currentBalances: [LimitBalance] = []
+        var weeklyBalances: [LimitBalance] = []
+
+        for group in groups {
+            guard let buckets = group["buckets"] as? [[String: Any]] else { continue }
+
+            for bucket in buckets {
+                guard let remaining = number(bucket["remaining_fraction"] ?? bucket["remainingFraction"]),
+                      let reset = date(bucket["reset_time"] ?? bucket["resetTime"]) else { continue }
+
+                let name = bucket["name"] as? String ?? "Usage limit"
+                let balance = LimitBalance(
+                    title: name,
+                    remainingPercent: clampPercent(Int((remaining * 100).rounded())),
+                    resetsAt: reset
+                )
+
+                if (bucket["window"] as? String)?.localizedCaseInsensitiveContains("weekly") == true ||
+                    name.localizedCaseInsensitiveContains("weekly") {
+                    weeklyBalances.append(balance)
+                } else if (bucket["window"] as? String)?.localizedCaseInsensitiveContains("5h") == true ||
+                            name.localizedCaseInsensitiveContains("five hour") {
+                    currentBalances.append(balance)
+                }
+            }
+        }
+
+        guard !currentBalances.isEmpty || !weeklyBalances.isEmpty else {
+            throw ConnectorError.message("Antigravity CLI returned no current or weekly quota buckets. Open Antigravity and run `/usage`, then retry.")
+        }
+
+        return ProviderSnapshot(
+            current: mostConstrained(currentBalances, title: "5-hour limit"),
+            weekly: mostConstrained(weeklyBalances, title: "Weekly limit"),
+            credits: nil,
+            accountEmail: latestAuthenticatedEmail(),
+            planName: nil
         )
+    }
+
+    private static func mostConstrained(_ balances: [LimitBalance], title: String) -> LimitBalance? {
+        guard let lowest = balances.min(by: { $0.remainingPercent < $1.remainingPercent }) else { return nil }
+        return LimitBalance(title: title, remainingPercent: lowest.remainingPercent, resetsAt: lowest.resetsAt)
     }
 
     private static func resolveBinary() async throws -> String {
@@ -892,12 +980,6 @@ struct AntigravityCLIConnector {
         return clean.contains("no longer supported") ||
             clean.contains("agy update") ||
             clean.contains("please update")
-    }
-
-    private static func hasModelList(_ output: String) -> Bool {
-        output
-            .split(whereSeparator: \.isNewline)
-            .contains { $0.localizedCaseInsensitiveContains("Gemini") || $0.localizedCaseInsensitiveContains("Claude") || $0.localizedCaseInsensitiveContains("GPT") }
     }
 
     private static var loginMessage: String {
@@ -1074,6 +1156,15 @@ private func number(_ value: Any?) -> Double? {
     if let value = value as? Int { return Double(value) }
     if let value = value as? String { return Double(value) }
     return nil
+}
+
+private func date(_ value: Any?) -> Date? {
+    if let timestamp = number(value) {
+        return Date(timeIntervalSince1970: timestamp)
+    }
+
+    guard let string = value as? String else { return nil }
+    return ISO8601DateFormatter().date(from: string)
 }
 
 private func clampPercent(_ value: Int) -> Int {
@@ -1416,11 +1507,11 @@ struct UpdateActionPill: View {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 12, weight: .semibold))
-                Text("Check Now")
+                Text("Check for Updates")
                     .font(.callout.weight(.semibold))
             }
             .foregroundStyle(foregroundColor)
-            .frame(width: 112, height: 29)
+            .frame(width: 144, height: 29)
             .background(backgroundFill, in: Capsule())
             .overlay(
                 Capsule()
@@ -1558,6 +1649,31 @@ struct ServiceBalanceCard: View {
                 BalanceMetric(kind: "Weekly", balance: service.weekly)
             }
 
+            if let availabilityMessage = service.limitAvailabilityMessage {
+                Label {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(availabilityMessage.title)
+                            .font(.caption.weight(.semibold))
+                        Text(availabilityMessage.detail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } icon: {
+                    Image(systemName: availabilityMessage.systemImage)
+                        .foregroundStyle(.orange)
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.orange.opacity(0.18), lineWidth: 1)
+                )
+            }
+
             if service.id == .codex, let credits = service.credits {
                 CreditsRow(credits: credits)
             }
@@ -1570,6 +1686,7 @@ struct ServiceBalanceCard: View {
         }
         .padding(14)
         .limitCard()
+        .accessibilityElement(children: .combine)
     }
 
     private var subtitle: String {
@@ -1933,11 +2050,14 @@ private func shortProviderError(_ service: ServiceLimit) -> String {
     let lower = message.lowercased()
 
     if service.id == .claude {
-        if lower.contains("session/api") || lower.contains("5-hour") || lower.contains("weekly") || lower.contains("rate_limits") {
-            return "Usage limits unavailable"
-        }
         if lower.contains("not logged in") || lower.contains("login") {
             return "Sign in required"
+        }
+        if lower.contains("session/api") {
+            return "Session/API data only"
+        }
+        if lower.contains("rate_limits") || lower.contains("5-hour") || lower.contains("weekly") {
+            return "Subscription limits unavailable"
         }
         if lower.contains("timed out") {
             return "Claude did not respond"
@@ -1993,12 +2113,20 @@ struct SettingsWindowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Limit Bar Settings")
-                    .font(.system(size: 25, weight: .semibold, design: .rounded))
-                Text("Manage local providers, alerts, and updates.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Limit Bar Settings")
+                        .font(.system(size: 25, weight: .semibold, design: .rounded))
+                    Text("Manage local providers, alerts, and updates.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                UpdateActionPill(isEnabled: appUpdater.canCheckForUpdates) {
+                    appUpdater.checkForUpdates()
+                }
             }
 
             VStack(spacing: 10) {
@@ -2015,10 +2143,11 @@ struct SettingsWindowView: View {
 
             notificationCard
 
-            updatesCard
+            settingsFooter
         }
         .padding(22)
-        .frame(width: 580, height: 710, alignment: .topLeading)
+        .padding(.bottom, 22)
+        .frame(width: 580, alignment: .topLeading)
         .background(AppSurfaceBackground())
         .onAppear {
             notificationDetailsExpanded = notificationSettings.isEnabled
@@ -2026,6 +2155,31 @@ struct SettingsWindowView: View {
         .onChange(of: notificationSettings.isEnabled) { _, isEnabled in
             updateNotificationDetailsVisibility(isEnabled: isEnabled)
         }
+    }
+
+    private var settingsFooter: some View {
+        VStack(spacing: 4) {
+            Text("Limit Bar v\(appVersion) (Build \(appBuild))")
+
+            HStack(spacing: 3) {
+                Text("Developed by")
+
+                Link("Artem Svitelskyi", destination: URL(string: "https://artsvit.com")!)
+                    .foregroundStyle(.white)
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 2)
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+
+    private var appBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
     }
 
     private var appOptionsCard: some View {
@@ -2074,7 +2228,7 @@ struct SettingsWindowView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Show current percent")
                     .font(.headline)
-                Text("Use 97% in the macOS menu bar instead of two bars.")
+                Text("Show percentages instead of usage bars for each provider.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -2110,7 +2264,7 @@ struct SettingsWindowView: View {
             }
 
             AccordionContent(isExpanded: notificationDetailsExpanded) {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
                     Rectangle()
                         .fill(SettingsPalette.divider)
                         .frame(height: 1)
@@ -2138,33 +2292,10 @@ struct SettingsWindowView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.top, 12)
+                .padding(.top, 8)
             }
         }
-        .padding(12)
-        .settingsCardSurface(cornerRadius: 15)
-    }
-
-    private var updatesCard: some View {
-        HStack(spacing: 10) {
-            SettingsAccentIcon(systemName: "arrow.triangle.2.circlepath", tint: .purple)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Software updates")
-                    .font(.headline)
-                Text(appUpdater.statusText)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            Spacer()
-
-            UpdateActionPill(isEnabled: appUpdater.canCheckForUpdates) {
-                appUpdater.checkForUpdates()
-            }
-        }
-        .padding(12)
+        .padding(10)
         .settingsCardSurface(cornerRadius: 15)
     }
 
@@ -2320,14 +2451,14 @@ struct ThresholdEditorCard: View {
     @Binding var value: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
             ThresholdPercentField(value: $value)
         }
-        .padding(10)
+        .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .settingsCardSurface(cornerRadius: 14, fill: SettingsPalette.surfaceRaised)
     }
@@ -2342,7 +2473,7 @@ struct ThresholdPercentField: View {
         HStack(alignment: .firstTextBaseline, spacing: 2) {
             TextField("50", text: $draftText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .font(.system(size: 25, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .multilineTextAlignment(.trailing)
                 .frame(width: 58)
@@ -2365,11 +2496,11 @@ struct ThresholdPercentField: View {
                 }
 
             Text("%")
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .font(.system(size: 25, weight: .semibold, design: .rounded))
                 .foregroundStyle(.primary)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.vertical, 5)
         .background(SettingsPalette.inputSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -2795,6 +2926,36 @@ private struct SettingsAccentIcon: View {
 }
 
 private extension ServiceLimit {
+    var limitAvailabilityMessage: (title: String, detail: String, systemImage: String)? {
+        guard id == .claude else { return nil }
+
+        if current == nil && weekly == nil {
+            return (
+                "Subscription limits unavailable",
+                "Claude Code connected, but did not provide 5-hour or weekly limits. Open Claude Code, run /usage, then refresh.",
+                "arrow.triangle.2.circlepath"
+            )
+        }
+
+        if current == nil {
+            return (
+                "5-hour limit unavailable",
+                "Claude Code provided the weekly window, but not the current 5-hour window yet.",
+                "clock.badge.questionmark"
+            )
+        }
+
+        if weekly == nil {
+            return (
+                "Weekly limit unavailable",
+                "Claude Code provided the current window, but not the weekly subscription window yet.",
+                "calendar.badge.exclamationmark"
+            )
+        }
+
+        return nil
+    }
+
     var warningText: String? {
         guard let lowest = [current?.remainingPercent, weekly?.remainingPercent].compactMap({ $0 }).min() else { return nil }
         if lowest < 20 { return "\(id.shortName) is low. Wait for the next reset before starting a large task." }

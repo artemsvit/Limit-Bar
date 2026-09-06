@@ -46,7 +46,7 @@ The script:
 
 1. Archives the app.
 2. Zips `Limit Bar.app`.
-3. Generates a signed `appcast.xml`.
-4. Creates a GitHub Release with the zip and appcast assets.
+3. Generates a signed `appcast.xml` whose release notes link to the public HTML page on `https://limitbar.artsvit.com/releases/`.
+4. Creates a GitHub Release with the zip, Markdown release body, HTML release page, and appcast assets.
 
 Sparkle compares versions with `CFBundleVersion`, currently sourced from `CURRENT_PROJECT_VERSION`.

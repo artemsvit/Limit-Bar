@@ -164,33 +164,61 @@ final class StatusBarController: NSObject {
     }
 
     private func refreshIcon(displayMode: MenuBarDisplayMode? = nil) {
-        let connected = store.services.filter(\.isConnected)
+        let preferredOrder: [LimitService] = [.claude, .codex, .antigravity]
+        let connected = preferredOrder.compactMap { id in
+            store.activeServices.first { $0.id == id && $0.isConnected }
+        }
         let current = connected.compactMap { $0.current?.remainingPercent }.min() ?? 0
-        let weekly = connected.compactMap { $0.weekly?.remainingPercent }.min() ?? 0
         let hasConnection = !connected.isEmpty
-        iconView.update(currentPercent: current, weeklyPercent: weekly, hasConnection: hasConnection)
+        iconView.update(services: connected)
         updateStatusButton(
             currentPercent: current,
             hasConnection: hasConnection,
+            connectedServices: connected,
             displayMode: displayMode ?? displayPreferences.mode
         )
     }
 
-    private func updateStatusButton(currentPercent: Int, hasConnection: Bool, displayMode: MenuBarDisplayMode) {
+    private func updateStatusButton(
+        currentPercent: Int,
+        hasConnection: Bool,
+        connectedServices: [ServiceLimit],
+        displayMode: MenuBarDisplayMode
+    ) {
         guard let button = statusItem.button else { return }
 
         switch displayMode {
         case .bars:
-            statusItem.length = 24
+            statusItem.length = CGFloat(max(connectedServices.count, 1)) * 24
             button.title = ""
             button.attributedTitle = NSAttributedString()
-            button.toolTip = "Limit Bar"
+            let summary = connectedServices.map { service in
+                let current = service.current.map { "\($0.remainingPercent)%" } ?? "unavailable"
+                let weekly = service.weekly.map { "\($0.remainingPercent)%" } ?? "unavailable"
+                return "\(service.id.shortName): current \(current), weekly \(weekly) remaining"
+            }.joined(separator: "\n")
+            button.toolTip = summary.isEmpty ? "Limit Bar" : summary
+            button.setAccessibilityLabel(summary.isEmpty ? "Limit Bar" : "Limit Bar. \(summary)")
             iconView.isHidden = false
             iconView.frame = button.bounds
 
         case .currentPercent:
+            button.setAccessibilityLabel("Limit Bar")
             iconView.isHidden = true
-            let title = hasConnection ? "\(currentPercent)%" : "--%"
+            let title: String
+            if connectedServices.count > 1 {
+                let preferredOrder: [LimitService] = [.claude, .codex, .antigravity, .gemini]
+                let orderedServices = connectedServices.sorted {
+                    (preferredOrder.firstIndex(of: $0.id) ?? .max) <
+                    (preferredOrder.firstIndex(of: $1.id) ?? .max)
+                }
+                title = orderedServices.map { service in
+                    let percent = service.current.map { "\($0.remainingPercent)%" } ?? "--"
+                    return "\(service.id.menuBarAbbreviation):\(percent)"
+                }.joined(separator: " ")
+            } else {
+                title = hasConnection ? "\(currentPercent)%" : "--%"
+            }
             let attributedTitle = NSAttributedString(
                 string: title,
                 attributes: [
@@ -200,22 +228,27 @@ final class StatusBarController: NSObject {
             )
             statusItem.length = ceil(attributedTitle.size().width) + 12
             button.attributedTitle = attributedTitle
-            button.toolTip = hasConnection ? "Current usage remaining: \(currentPercent)%" : "Limit Bar"
+            button.toolTip = connectedServices.count > 1
+                ? connectedServices
+                    .sorted { $0.id.shortName < $1.id.shortName }
+                    .map { service in
+                        let percent = service.current.map { "\($0.remainingPercent)%" } ?? "--"
+                        return "\(service.id.shortName): \(percent) remaining"
+                    }
+                    .joined(separator: " · ")
+                : (hasConnection ? "Current usage remaining: \(currentPercent)%" : "Limit Bar")
         }
     }
 }
 
 final class UsageStatusIconView: NSView {
-    private var currentPercent = 0
-    private var weeklyPercent = 0
-    private var hasConnection = false
+    private var services: [ServiceLimit] = []
+    private var hasConnection: Bool { !services.isEmpty }
 
     override var isFlipped: Bool { true }
 
-    func update(currentPercent: Int, weeklyPercent: Int, hasConnection: Bool) {
-        self.currentPercent = min(max(currentPercent, 0), 100)
-        self.weeklyPercent = min(max(weeklyPercent, 0), 100)
-        self.hasConnection = hasConnection
+    func update(services: [ServiceLimit]) {
+        self.services = services
         needsDisplay = true
     }
 
@@ -226,26 +259,33 @@ final class UsageStatusIconView: NSView {
         let gap: CGFloat = 4
         let totalWidth = barWidth * 2 + gap
         let maxHeight: CGFloat = 15
-        let originX = (bounds.width - totalWidth) / 2
+        let count = max(services.count, 1)
+        let groupWidth: CGFloat = 24
+        let originX = (bounds.width - CGFloat(count) * groupWidth) / 2 + (groupWidth - totalWidth) / 2
         let originY = (bounds.height - maxHeight) / 2
 
+        for index in 0..<count {
+        let service = services.isEmpty ? nil : services[index]
+        let x = originX + CGFloat(index) * groupWidth
         drawBar(
-            x: originX,
+            x: x,
             y: originY,
             width: barWidth,
             height: maxHeight,
-            percent: currentPercent
+            percent: service?.current?.remainingPercent ?? 0
         )
         drawBar(
-            x: originX + barWidth + gap,
+            x: x + barWidth + gap,
             y: originY,
             width: barWidth,
             height: maxHeight,
-            percent: weeklyPercent
+            percent: service?.weekly?.remainingPercent ?? 0
         )
+        }
     }
 
     private func drawBar(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, percent: Int) {
+        let percent = min(max(percent, 0), 100)
         let railRect = NSRect(x: x, y: y, width: width, height: height)
         let rail = NSBezierPath(roundedRect: railRect, xRadius: width / 2, yRadius: width / 2)
         NSColor.labelColor.withAlphaComponent(hasConnection ? 0.22 : 0.16).setFill()
@@ -271,7 +311,7 @@ final class UsageStatusIconView: NSView {
 final class SettingsWindowPresenter {
     static let shared = SettingsWindowPresenter()
 
-    private let windowHeight: CGFloat = 710
+    private let windowHeight: CGFloat = 740
     private let windowWidth: CGFloat = 580
     private var window: NSWindow?
 
