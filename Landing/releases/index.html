@@ -6,16 +6,24 @@
   <title>Limit Bar — Release Notes</title>
   <meta name="description" content="Release notes and product updates for Limit Bar.">
   <link rel="canonical" href="https://limitbar.artsvit.com/releases/">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="../styles.css?v=20260906-2">
 </head>
 <body class="release-page">
   <header class="site-header" aria-label="Primary">
     <div class="site-header-inner">
       <a class="brand" href="../" aria-label="Limit Bar home">
-        <img src="../assets/app-icon.png" alt="" class="brand-icon" width="38" height="38">
+        <img src="../assets/app-icon.png" alt="" class="brand-icon" width="38" height="38" fetchpriority="high">
         <span translate="no">Limit Bar</span>
       </a>
-      <a class="header-link" href="../">Back to app</a>
+      <div class="header-actions">
+        <a class="primary-button" href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.6/Limit-Bar-1.0.6.dmg" aria-label="Download Limit Bar for macOS" target="_blank" rel="noopener noreferrer">
+          <span class="button-icon" aria-hidden="true"><i data-lucide="download"></i></span>
+          Download
+        </a>
+      </div>
     </div>
   </header>
 
@@ -77,5 +85,7 @@
     </nav>
     <span class="footer-credit" translate="no">Limit Bar by <a href="https://artsvit.com" target="_blank" rel="noopener noreferrer">Artem Svitelskyi</a></span>
   </footer>
+  <script src="https://unpkg.com/lucide@0.542.0/dist/umd/lucide.min.js"></script>
+  <script>lucide.createIcons({ attrs: { class: "lucide-icon", "aria-hidden": "true" } });</script>
 </body>
 </html>
