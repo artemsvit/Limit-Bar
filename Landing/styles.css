@@ -166,7 +166,7 @@ section[id] {
   grid-template-areas: "top visual";
   gap: 64px;
   align-items: flex-start;
-  padding: 42px 0 54px;
+  padding: 42px 0 28px;
 }
 
 .hero-copy-top {
@@ -331,7 +331,7 @@ h3 {
 .hero-visual {
   grid-area: visual;
   position: relative;
-  min-height: 640px;
+  min-height: 0;
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
