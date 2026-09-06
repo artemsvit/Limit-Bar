@@ -166,7 +166,7 @@ section[id] {
   grid-template-areas: "top visual";
   gap: 64px;
   align-items: flex-start;
-  padding: 42px 0 28px;
+  padding: 42px 0 96px;
 }
 
 .hero-copy-top {
@@ -1051,7 +1051,7 @@ footer a:hover {
   .hero {
     grid-template-columns: minmax(0, 1fr) minmax(320px, 0.92fr);
     gap: 40px;
-    padding: 28px 0 48px;
+    padding: 28px 0 84px;
   }
 
   .hero-copy {
@@ -1095,17 +1095,13 @@ footer a:hover {
     grid-template-columns: 1fr;
     grid-template-areas:
       "top"
-      "visual"
-      "bottom";
+      "visual";
+    gap: 28px;
+    padding: 24px 0 76px;
   }
 
   .split-section {
     grid-template-columns: 1fr;
-  }
-
-  .hero {
-    gap: 28px;
-    padding-top: 24px;
   }
 
   .hero-copy {
@@ -1318,7 +1314,7 @@ footer a:hover {
 
   .hero {
     gap: 22px;
-    padding: 18px 0 40px;
+    padding: 18px 0 64px;
   }
 
   h1 {
