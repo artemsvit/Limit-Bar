@@ -734,12 +734,9 @@ body.is-loaded .progress-fill {
 .feature-card {
   padding: 28px;
   border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(244, 235, 220, 0.8));
   box-shadow: var(--shadow-sm);
   transition: box-shadow var(--duration-fast) var(--ease-standard);
-}
-
-.feature-card-large {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(244, 235, 220, 0.8));
 }
 
 @media (pointer: fine) and (hover: hover) {
