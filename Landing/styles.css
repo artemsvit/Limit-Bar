@@ -487,8 +487,8 @@ body.is-loaded .progress-fill {
 }
 
 .release-shell {
-  max-width: 820px;
-  padding: 76px 0 92px;
+  max-width: 1160px;
+  padding: 86px 0 104px;
 }
 
 .release-card {
@@ -505,6 +505,26 @@ body.is-loaded .progress-fill {
   font-size: clamp(3.2rem, 8vw, 6rem);
 }
 
+.release-notes-card {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.release-notes-card > .eyebrow,
+.release-notes-card > h1,
+.release-notes-card > .release-lede {
+  max-width: 44rem;
+  margin-left: 4px;
+}
+
+.release-detail-card {
+  max-width: 820px;
+  margin: 0 auto;
+}
+
 .release-lede {
   max-width: 38rem;
   margin-bottom: 28px;
@@ -514,17 +534,21 @@ body.is-loaded .progress-fill {
 }
 
 .release-entry {
-  padding: 40px 0 0;
-  margin-top: 40px;
-  border-top: 1px solid var(--line);
+  padding: clamp(28px, 4vw, 46px);
+  margin-top: 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 252, 247, 0.72);
+  box-shadow: var(--shadow-sm);
 }
 
 .release-entry-latest {
-  margin: 38px -14px 0;
-  padding: 30px;
+  margin-top: 38px;
+  padding: clamp(30px, 4.6vw, 54px);
   border: 1px solid rgba(31, 107, 255, 0.2);
-  border-radius: 24px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(135deg, rgba(237, 244, 255, 0.92), rgba(255, 253, 248, 0.96));
+  box-shadow: var(--shadow-md);
 }
 
 .release-entry-heading {
@@ -549,7 +573,7 @@ body.is-loaded .progress-fill {
 }
 
 .release-entry-summary {
-  max-width: 42rem;
+  max-width: 48rem;
   margin: 18px 0 24px;
   color: var(--muted);
   font-size: 1.06rem;
