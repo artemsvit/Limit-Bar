@@ -585,6 +585,41 @@ body.is-loaded .progress-fill {
   box-shadow: var(--shadow-sm);
 }
 
+.release-latest-label {
+  margin: 38px 0 14px;
+  color: var(--soft);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.release-list-item-latest {
+  border-color: rgba(31, 107, 255, 0.24);
+  background: linear-gradient(135deg, rgba(237, 244, 255, 0.94), rgba(255, 253, 248, 0.98));
+}
+
+.release-provider-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -4px 0 40px;
+}
+
+.release-provider-row span {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.release-detail-card .release-actions {
+  margin-bottom: 42px;
+}
+
 .release-list-item strong,
 .release-list-item small {
   display: block;

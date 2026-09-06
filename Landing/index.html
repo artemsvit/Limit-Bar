@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Limit Bar - macOS menu bar app for Codex and Claude Code usage tracking</title>
-  <meta name="description" content="Limit Bar is a macOS menu bar app for tracking Codex and Claude Code usage with reset times, low-balance alerts, and local session monitoring.">
+  <title>Limit Bar - macOS menu bar app for AI usage tracking</title>
+  <meta name="description" content="Limit Bar is a macOS menu bar app for tracking Codex, Claude Code, and Antigravity usage with reset times, low-balance alerts, and local session monitoring.">
   <meta name="theme-color" content="#f5efe4">
   <meta name="robots" content="index, follow">
   <meta name="application-name" content="Limit Bar">
@@ -14,18 +14,18 @@
   <meta property="og:type" content="website">
   <meta property="og:locale" content="en_US">
   <meta property="og:site_name" content="Limit Bar">
-  <meta property="og:title" content="Limit Bar - macOS menu bar app for Codex and Claude Code usage tracking">
-  <meta property="og:description" content="Track Codex and Claude Code usage from your macOS menu bar with reset times, low-balance alerts, and local session monitoring.">
+  <meta property="og:title" content="Limit Bar - macOS menu bar app for AI usage tracking">
+  <meta property="og:description" content="Track Codex, Claude Code, and Antigravity usage from your macOS menu bar with reset times, low-balance alerts, and local session monitoring.">
   <meta property="og:url" content="https://limitbar.artsvit.com/">
   <meta property="og:image" content="https://limitbar.artsvit.com/og-image.png">
-  <meta property="og:image:alt" content="Limit Bar preview showing menu bar usage tracking for Codex and Claude Code">
+  <meta property="og:image:alt" content="Limit Bar preview showing menu bar usage tracking for Codex, Claude Code, and Antigravity">
   <meta property="og:image:width" content="1199">
   <meta property="og:image:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Limit Bar - macOS menu bar app for Codex and Claude Code usage tracking">
-  <meta name="twitter:description" content="Track Codex and Claude Code usage from your macOS menu bar with reset times, low-balance alerts, and local session monitoring.">
+  <meta name="twitter:title" content="Limit Bar - macOS menu bar app for AI usage tracking">
+  <meta name="twitter:description" content="Track Codex, Claude Code, and Antigravity usage from your macOS menu bar with reset times, low-balance alerts, and local session monitoring.">
   <meta name="twitter:image" content="https://limitbar.artsvit.com/og-image.png">
-  <meta name="twitter:image:alt" content="Limit Bar preview showing menu bar usage tracking for Codex and Claude Code">
+  <meta name="twitter:image:alt" content="Limit Bar preview showing menu bar usage tracking for Codex, Claude Code, and Antigravity">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -52,7 +52,7 @@
           "applicationCategory": "UtilitiesApplication",
           "operatingSystem": "macOS 15.6+",
           "softwareVersion": "1.0.6",
-          "description": "Limit Bar is a macOS menu bar app for tracking Codex and Claude Code usage, reset timers, and low-balance alerts from local CLI sessions.",
+          "description": "Limit Bar is a macOS menu bar app for tracking Codex, Claude Code, and Antigravity usage, reset timers, and low-balance alerts from local CLI sessions.",
           "url": "https://limitbar.artsvit.com/",
           "downloadUrl": "https://github.com/artemsvit/Limit-Bar/releases/latest",
           "image": "https://limitbar.artsvit.com/og-image.png",
@@ -65,6 +65,7 @@
           "featureList": [
             "Codex usage tracking",
             "Claude Code usage tracking",
+            "Antigravity usage tracking",
             "Current and weekly reset timers",
             "Low-balance notifications",
             "Signed Sparkle updates"
@@ -79,12 +80,12 @@
               "name": "What is Limit Bar?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Limit Bar is a macOS menu bar app that tracks Codex and Claude Code usage, shows reset times, and alerts you when remaining usage gets low."
+              "text": "Limit Bar is a macOS menu bar app that tracks Codex, Claude Code, and Antigravity usage, shows reset times, and alerts you when remaining usage gets low."
               }
             },
             {
               "@type": "Question",
-              "name": "How does Limit Bar track Codex and Claude Code usage?",
+            "name": "How does Limit Bar track AI provider usage?",
               "acceptedAnswer": {
                 "@type": "Answer",
                 "text": "Limit Bar reads local CLI session data so you can monitor current and weekly usage windows from the macOS menu bar without browser scraping or copied cookies."
@@ -95,7 +96,7 @@
               "name": "Who is Limit Bar for?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Limit Bar is for developers and AI power users who rely on Codex or Claude Code and want a quick, glanceable view of usage headroom before starting another run."
+              "text": "Limit Bar is for developers and AI power users who rely on Codex, Claude Code, or Antigravity and want a quick, glanceable view of usage headroom before starting another run."
               }
             }
           ]
@@ -114,7 +115,6 @@
         <span translate="no">Limit Bar</span>
       </a>
       <div class="header-actions">
-        <a class="header-link" href="/releases/">Release notes</a>
         <a
           class="primary-button"
           href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.6/Limit-Bar-1.0.6.dmg"
@@ -135,7 +135,7 @@
       <div class="hero-copy hero-copy-top">
         <p class="eyebrow">macOS menu bar app</p>
         <h1>Know your AI headroom.</h1>
-        <p class="hero-text">Limit Bar keeps Codex and Claude Code usage, reset times, and remaining headroom visible in your menu bar.</p>
+        <p class="hero-text">Limit Bar keeps Codex, Claude Code, and Antigravity usage, reset times, and remaining headroom visible in your menu bar.</p>
       </div>
 
       <div class="hero-visual" aria-label="Limit Bar interface preview">
@@ -207,6 +207,10 @@
             <img src="assets/claude-code.png" alt="" width="28" height="28">
             <span>Claude Code</span>
           </div>
+          <div>
+            <img src="assets/antigravity.png" alt="" width="28" height="28">
+            <span>Antigravity</span>
+          </div>
         </div>
       </div>
     </section>
@@ -214,7 +218,7 @@
     <section class="section-intro" id="features">
       <p class="eyebrow">Why it feels better</p>
       <h2>Built for developers who want a faster AI usage tracker.</h2>
-      <p class="section-copy">Instead of another dashboard, Limit Bar gives you a calm, glanceable menu bar view for Codex and Claude Code usage on macOS.</p>
+      <p class="section-copy">Instead of another dashboard, Limit Bar gives you a calm, glanceable menu bar view for Codex, Claude Code, and Antigravity usage on macOS.</p>
     </section>
 
     <section class="feature-layout">
@@ -286,7 +290,7 @@
           <span class="settings-icon" aria-hidden="true"><i data-lucide="percent"></i></span>
           <div>
             <strong id="setting-percent-label">Menu bar percent</strong>
-            <p id="setting-percent-description">Show the current balance as 97% instead of two bars.</p>
+            <p id="setting-percent-description">Show each provider balance as a compact percentage summary.</p>
           </div>
           <button
             class="toggle toggle-button on"
@@ -311,12 +315,12 @@
       <div class="faq-grid">
         <article class="faq-card">
           <h3>What is Limit Bar?</h3>
-          <p>Limit Bar is a macOS menu bar app for tracking Codex and Claude Code usage, reset times, and remaining headroom from local sessions.</p>
+          <p>Limit Bar is a macOS menu bar app for tracking Codex, Claude Code, and Antigravity usage, reset times, and remaining headroom from local sessions.</p>
         </article>
 
         <article class="faq-card">
           <h3>How does usage tracking work?</h3>
-          <p>The app reads local CLI session data, then shows current and weekly usage windows in a small menu bar interface you can check in a second.</p>
+          <p>The app reads local CLI session data, then shows current and weekly usage windows for each connected provider in a small menu bar interface you can check in a second.</p>
         </article>
 
         <article class="faq-card">
@@ -330,7 +334,7 @@
       <div>
         <p class="eyebrow">Ready when you are</p>
         <h2>Download the macOS app and keep your next AI run honest.</h2>
-        <p>Download Limit Bar, put it in the menu bar, and stop guessing whether your Codex or Claude Code usage still has enough headroom left.</p>
+        <p>Download Limit Bar, put it in the menu bar, and stop guessing whether your AI usage still has enough headroom left.</p>
       </div>
       <a
         class="primary-button"
@@ -347,6 +351,7 @@
 
   <footer>
     <span translate="no">Limit Bar by <a href="https://artsvit.com" target="_blank" rel="noopener noreferrer">Artem Svitelskyi</a></span>
+    <a href="/releases/">Release notes</a>
     <a href="https://github.com/artemsvit/Limit-Bar" target="_blank" rel="noopener noreferrer">
       <i data-lucide="github" aria-hidden="true"></i>
       GitHub
