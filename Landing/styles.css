@@ -306,12 +306,6 @@ h3 {
   margin-top: 18px;
 }
 
-.provider-label {
-  color: var(--soft);
-  font-size: 0.9rem;
-  font-weight: 700;
-}
-
 .provider-strip div {
   display: inline-flex;
   align-items: center;
@@ -1216,12 +1210,6 @@ footer a:hover {
 
   .provider-strip {
     gap: 10px;
-    align-items: center;
-  }
-
-  .provider-label {
-    min-height: 44px;
-    display: inline-flex;
     align-items: center;
   }
 
