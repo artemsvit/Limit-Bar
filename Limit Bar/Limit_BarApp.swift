@@ -71,6 +71,17 @@ final class AppUpdater: ObservableObject {
         isConfigured && updaterController.updater.canCheckForUpdates
     }
 
+    /// Background update checks. Sparkle persists this itself; `SUEnableAutomaticChecks`
+    /// in Info.plist only supplies the default for someone who has never changed it.
+    var automaticallyChecksForUpdates: Bool {
+        get { isConfigured && updaterController.updater.automaticallyChecksForUpdates }
+        set {
+            guard isConfigured else { return }
+            objectWillChange.send()
+            updaterController.updater.automaticallyChecksForUpdates = newValue
+        }
+    }
+
     var statusText: String {
         if isConfigured {
             return "Sparkle is configured for signed appcast updates."

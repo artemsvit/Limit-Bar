@@ -129,6 +129,10 @@ Release ${VERSION} (${BUILD}).
 EOF
 fi
 
+# Regenerate the compact page Sparkle shows in its update dialog, so the notes
+# in the app always match the Markdown release body.
+python3 "$ROOT_DIR/scripts/make-release-notes.py" "$VERSION"
+
 RELEASE_PAGE_SOURCE="$ROOT_DIR/Landing/releases/Limit-Bar-${VERSION}.html"
 if [[ ! -f "$RELEASE_PAGE_SOURCE" ]]; then
   echo "Missing public release page: $RELEASE_PAGE_SOURCE"

@@ -2250,9 +2250,46 @@ struct SettingsWindowView: View {
                 .frame(height: 1)
 
             menuBarDisplayRow
+
+            Rectangle()
+                .fill(SettingsPalette.divider)
+                .frame(height: 1)
+
+            automaticUpdatesRow
         }
         .padding(12)
         .settingsCardSurface(cornerRadius: 15)
+    }
+
+    private var automaticUpdatesRow: some View {
+        HStack(spacing: 10) {
+            SettingsAccentIcon(systemName: "arrow.triangle.2.circlepath", tint: .blue)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Automatic update checks")
+                    .font(.headline)
+                Text("Look for a new version when Limit Bar starts, then once a day.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: automaticUpdateCheckBinding)
+                .labelsHidden()
+                .toggleStyle(BrandedLoginToggleStyle())
+                .disabled(!appUpdater.isConfigured)
+        }
+        .opacity(appUpdater.isConfigured ? 1 : 0.55)
+        .help(appUpdater.isConfigured ? "Check for updates in the background" : appUpdater.statusText)
+    }
+
+    private var automaticUpdateCheckBinding: Binding<Bool> {
+        Binding(
+            get: { appUpdater.automaticallyChecksForUpdates },
+            set: { appUpdater.automaticallyChecksForUpdates = $0 }
+        )
     }
 
     private var startAtLoginRow: some View {
