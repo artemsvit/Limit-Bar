@@ -311,9 +311,9 @@ final class UsageStatusIconView: NSView {
 final class SettingsWindowPresenter {
     static let shared = SettingsWindowPresenter()
 
-    private let windowHeight: CGFloat = 740
     private let windowWidth: CGFloat = 580
     private var window: NSWindow?
+    private let windowDelegate = TopAnchoredWindowDelegate()
 
     func open(store: LimitStore) {
         if let window {
@@ -326,26 +326,61 @@ final class SettingsWindowPresenter {
             rootView: SettingsWindowView()
                 .environmentObject(store)
         )
+        // Let the window track the SwiftUI content height instead of padding a fixed
+        // frame, so no empty band is left below the footer.
+        hostingView.sizingOptions = [.preferredContentSize]
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: hostingView.fittingSize.height),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "Settings"
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: windowWidth, height: windowHeight)
         window.contentView = hostingView
+        window.delegate = windowDelegate
         window.center()
+        windowDelegate.captureTop(of: window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         self.window = window
     }
+}
 
-    func updateHeight(showingNotificationsDetails: Bool, animated: Bool = true) {
-        // Settings uses a fixed-height window so accordions never shake the window frame.
+/// When the notifications accordion opens or closes, AppKit resizes the window from its
+/// bottom-left origin, which makes the title bar jump. Pin the top edge instead.
+@MainActor
+private final class TopAnchoredWindowDelegate: NSObject, NSWindowDelegate {
+    private var topEdge: CGFloat?
+    private var isAdjusting = false
+
+    func captureTop(of window: NSWindow) {
+        topEdge = window.frame.maxY
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard !isAdjusting, let window = notification.object as? NSWindow else { return }
+        topEdge = window.frame.maxY
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard !isAdjusting, let window = notification.object as? NSWindow else { return }
+
+        guard let topEdge else {
+            self.topEdge = window.frame.maxY
+            return
+        }
+
+        let drift = window.frame.maxY - topEdge
+        guard abs(drift) > 0.5 else { return }
+
+        isAdjusting = true
+        var frame = window.frame
+        frame.origin.y = topEdge - frame.height
+        window.setFrame(frame, display: true)
+        isAdjusting = false
     }
 }

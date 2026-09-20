@@ -1324,8 +1324,20 @@ struct OnboardingView: View {
 struct ConnectServiceRow: View {
     @EnvironmentObject private var store: LimitStore
     let service: ServiceLimit
+    var showsSurface = true
 
     var body: some View {
+        if showsSurface {
+            rowContent
+                .settingsCardSurface(cornerRadius: 15)
+                .help(service.errorMessage ?? statusText)
+        } else {
+            rowContent
+                .help(service.errorMessage ?? statusText)
+        }
+    }
+
+    private var rowContent: some View {
         HStack(spacing: 10) {
             ServiceIcon(service: service.id, size: 36)
 
@@ -1351,18 +1363,32 @@ struct ConnectServiceRow: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .frame(height: 60)
-        .settingsCardSurface(cornerRadius: 15)
-        .help(service.errorMessage ?? statusText)
+        .frame(height: 56)
     }
 
     private var statusText: String {
         switch service.state {
         case .disconnected: return "Ready to connect"
         case .connecting: return "Reading local usage"
-        case .connected: return "Connected"
+        case .connected: return connectedDetail
         case .failed: return shortProviderError(service)
         }
+    }
+
+    /// The status pill already says "Connected", so prefer account or plan detail here
+    /// and only fall back to repeating the state when nothing else is known.
+    private var connectedDetail: String {
+        if let email = service.accountEmail, !email.isEmpty {
+            return email
+        }
+
+        if let plan = service.planName,
+           !plan.isEmpty,
+           plan.caseInsensitiveCompare(service.id.shortName) != .orderedSame {
+            return plan
+        }
+
+        return "Connected"
     }
 }
 
@@ -2112,42 +2138,26 @@ struct SettingsWindowView: View {
     @State private var notificationDetailsExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Limit Bar Settings")
-                        .font(.system(size: 25, weight: .semibold, design: .rounded))
-                    Text("Manage local providers, alerts, and updates.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
+        VStack(alignment: .leading, spacing: 14) {
+            settingsHeader
 
-                Spacer(minLength: 0)
-
-                UpdateActionPill(isEnabled: appUpdater.canCheckForUpdates) {
-                    appUpdater.checkForUpdates()
-                }
+            settingsSection("Providers") {
+                providersCard
             }
 
-            VStack(spacing: 10) {
-                ForEach(store.activeServices) { service in
-                    ConnectServiceRow(service: service)
-                }
+            settingsSection("General") {
+                appOptionsCard
             }
 
-            Rectangle()
-                .fill(SettingsPalette.divider)
-                .frame(height: 1)
-
-            appOptionsCard
-
-            notificationCard
+            settingsSection("Notifications") {
+                notificationCard
+            }
 
             settingsFooter
         }
         .padding(22)
-        .padding(.bottom, 22)
         .frame(width: 580, alignment: .topLeading)
+        .fixedSize(horizontal: false, vertical: true)
         .background(AppSurfaceBackground())
         .onAppear {
             notificationDetailsExpanded = notificationSettings.isEnabled
@@ -2155,6 +2165,55 @@ struct SettingsWindowView: View {
         .onChange(of: notificationSettings.isEnabled) { _, isEnabled in
             updateNotificationDetailsVisibility(isEnabled: isEnabled)
         }
+    }
+
+    private var settingsHeader: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Limit Bar Settings")
+                    .font(.system(size: 25, weight: .semibold, design: .rounded))
+                Text("Manage local providers, alerts, and updates.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            UpdateActionPill(isEnabled: appUpdater.canCheckForUpdates) {
+                appUpdater.checkForUpdates()
+            }
+        }
+    }
+
+    private func settingsSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .tracking(0.9)
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 4)
+
+            content()
+        }
+    }
+
+    private var providersCard: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(store.activeServices.enumerated()), id: \.element.id) { index, service in
+                if index > 0 {
+                    Rectangle()
+                        .fill(SettingsPalette.divider)
+                        .frame(height: 1)
+                        .padding(.leading, 60)
+                }
+
+                ConnectServiceRow(service: service, showsSurface: false)
+            }
+        }
+        .settingsCardSurface(cornerRadius: 15)
     }
 
     private var settingsFooter: some View {
@@ -2165,7 +2224,7 @@ struct SettingsWindowView: View {
                 Text("Developed by")
 
                 Link("Artem Svitelskyi", destination: URL(string: "https://artsvit.com")!)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
             }
         }
         .font(.caption2)
@@ -2264,27 +2323,40 @@ struct SettingsWindowView: View {
             }
 
             AccordionContent(isExpanded: notificationDetailsExpanded) {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     Rectangle()
                         .fill(SettingsPalette.divider)
                         .frame(height: 1)
 
-                    HStack {
-                        Text("Thresholds")
+                    HStack(spacing: 10) {
+                        Text("Alert thresholds")
                             .font(.callout.weight(.semibold))
-                        Spacer()
-                        Button("Test Notification") {
+
+                        Spacer(minLength: 0)
+
+                        SettingsPillButton(title: "Send a test") {
                             UsageNotificationCenter.sendTestNotification()
                         }
-                        .font(.callout.weight(.medium))
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
                     }
 
                     HStack(spacing: 8) {
-                        ThresholdEditorCard(title: "Early", value: notificationSettings.thresholdBinding(at: 0))
-                        ThresholdEditorCard(title: "Warn", value: notificationSettings.thresholdBinding(at: 1))
-                        ThresholdEditorCard(title: "Critical", value: notificationSettings.thresholdBinding(at: 2))
+                        ThresholdTile(severity: .early, value: notificationSettings.thresholdBinding(at: 0))
+                        ThresholdTile(severity: .warn, value: notificationSettings.thresholdBinding(at: 1))
+                        ThresholdTile(severity: .critical, value: notificationSettings.thresholdBinding(at: 2))
+                    }
+
+                    HStack(spacing: 8) {
+                        Text("0%")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+
+                        ThresholdRuler(values: thresholdValues)
+
+                        Text("100%")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
                     }
 
                     Text("Recommended: 50%, 25%, and 10%. Applies to current and weekly balances.")
@@ -2292,11 +2364,15 @@ struct SettingsWindowView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.top, 8)
+                .padding(.top, 10)
             }
         }
-        .padding(10)
+        .padding(12)
         .settingsCardSurface(cornerRadius: 15)
+    }
+
+    private var thresholdValues: [Int] {
+        (0..<3).map { notificationSettings.thresholdBinding(at: $0).wrappedValue }
     }
 
     private var notificationEnabledBinding: Binding<Bool> {
@@ -2446,69 +2522,140 @@ struct BrandedLoginToggleStyle: ToggleStyle {
     }
 }
 
-struct ThresholdEditorCard: View {
-    let title: String
-    @Binding var value: Int
+enum ThresholdSeverity: CaseIterable {
+    case early
+    case warn
+    case critical
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            ThresholdPercentField(value: $value)
+    var title: String {
+        switch self {
+        case .early: return "Early"
+        case .warn: return "Warn"
+        case .critical: return "Critical"
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .settingsCardSurface(cornerRadius: 14, fill: SettingsPalette.surfaceRaised)
+    }
+
+    var color: Color {
+        switch self {
+        case .early: return SettingsPalette.thresholdEarly
+        case .warn: return SettingsPalette.thresholdWarn
+        case .critical: return SettingsPalette.thresholdCritical
+        }
     }
 }
 
-struct ThresholdPercentField: View {
+/// One threshold input. The tile itself is the field: a single surface that takes
+/// focus, so there is no box-inside-a-box nesting around the number.
+struct ThresholdTile: View {
+    let severity: ThresholdSeverity
     @Binding var value: Int
     @FocusState private var isFocused: Bool
     @State private var draftText = ""
+    @State private var isHovering = false
+
+    private let step = 5
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 2) {
-            TextField("50", text: $draftText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 25, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .multilineTextAlignment(.trailing)
-                .frame(width: 58)
-                .focused($isFocused)
-                .onSubmit(commitDraft)
-                .onChange(of: draftText) { _, text in
-                    sanitize(text)
-                }
-                .onChange(of: value) { _, newValue in
-                    if !isFocused {
-                        draftText = "\(newValue)"
-                    }
-                }
-                .onChange(of: isFocused) { _, focused in
-                    if focused {
-                        draftText = "\(value)"
-                    } else {
-                        commitDraft()
-                    }
-                }
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(severity.color)
+                    .frame(width: 7, height: 7)
 
-            Text("%")
-                .font(.system(size: 25, weight: .semibold, design: .rounded))
-                .foregroundStyle(.primary)
+                Text(severity.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 1) {
+                TextField("50", text: $draftText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 26, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 42, alignment: .leading)
+                    .focused($isFocused)
+                    .onSubmit(commitDraft)
+                    .onChange(of: draftText) { _, text in
+                        sanitize(text)
+                    }
+                    .onChange(of: value) { _, newValue in
+                        if !isFocused {
+                            draftText = "\(newValue)"
+                        }
+                    }
+                    .onChange(of: isFocused) { _, focused in
+                        if focused {
+                            draftText = "\(value)"
+                        } else {
+                            commitDraft()
+                        }
+                    }
+                    .accessibilityLabel("\(severity.title) threshold")
+
+                Text("%")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 4)
+
+                stepper
+                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 4 }
+            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(SettingsPalette.inputSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(SettingsPalette.surfaceRaised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(isFocused ? SettingsPalette.inputFocusBorder : SettingsPalette.border, lineWidth: 1)
         )
-        .onAppear {
-            draftText = "\(value)"
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onHover { isHovering = $0 }
+        .onTapGesture { isFocused = true }
+        .onAppear { draftText = "\(value)" }
+    }
+
+    private var stepper: some View {
+        HStack(spacing: 4) {
+            stepButton(symbol: "minus", delta: -step, hint: "Decrease")
+            stepButton(symbol: "plus", delta: step, hint: "Increase")
         }
+        .opacity(isHovering || isFocused ? 1 : 0.5)
+        .animation(.easeInOut(duration: 0.15), value: isHovering)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+
+    private func stepButton(symbol: String, delta: Int, hint: String) -> some View {
+        Button {
+            adjust(by: delta)
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+                .background(SettingsPalette.buttonSurface, in: Circle())
+                .overlay(
+                    Circle()
+                        .strokeBorder(SettingsPalette.border, lineWidth: 1)
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(hint) \(severity.title) threshold")
+    }
+
+    private func adjust(by delta: Int) {
+        let next = clamp(value + delta)
+        value = next
+        draftText = "\(next)"
+    }
+
+    private func clamp(_ candidate: Int) -> Int {
+        min(max(candidate, 1), 99)
     }
 
     private func sanitize(_ text: String) {
@@ -2523,9 +2670,93 @@ struct ThresholdPercentField: View {
             return
         }
 
-        let clampedValue = min(max(typedValue, 1), 99)
+        let clampedValue = clamp(typedValue)
         value = clampedValue
         draftText = "\(clampedValue)"
+    }
+}
+
+/// Shows where the three thresholds sit on a full-to-empty balance, so the
+/// numbers read as a sequence instead of three unrelated fields.
+struct ThresholdRuler: View {
+    let values: [Int]
+
+    private let markerWidth: CGFloat = 3
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                SettingsPalette.thresholdCritical.opacity(0.55),
+                                SettingsPalette.thresholdWarn.opacity(0.50),
+                                SettingsPalette.thresholdEarly.opacity(0.45)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(height: 6)
+                    .frame(maxHeight: .infinity, alignment: .center)
+
+                ForEach(Array(values.enumerated()), id: \.offset) { index, value in
+                    Capsule()
+                        .fill(color(at: index))
+                        .frame(width: markerWidth, height: 14)
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(SettingsPalette.surfaceRaised, lineWidth: 1)
+                        )
+                        .offset(x: offset(for: value, width: proxy.size.width))
+                        .frame(maxHeight: .infinity, alignment: .center)
+                }
+            }
+        }
+        .frame(height: 14)
+        .accessibilityHidden(true)
+    }
+
+    private func color(at index: Int) -> Color {
+        let severities = ThresholdSeverity.allCases
+        guard index < severities.count else { return SettingsPalette.thresholdEarly }
+        return severities[index].color
+    }
+
+    private func offset(for value: Int, width: CGFloat) -> CGFloat {
+        guard width > markerWidth else { return 0 }
+        let ratio = min(max(Double(value) / 100, 0), 1)
+        let raw = CGFloat(ratio) * width - markerWidth / 2
+        return min(max(raw, 0), width - markerWidth)
+    }
+}
+
+/// Small bordered button so secondary actions read as tappable rather than as label text.
+struct SettingsPillButton: View {
+    let title: String
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(SettingsPalette.actionText)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 5)
+                .background(
+                    isHovering ? SettingsPalette.actionButtonSurfaceHover : SettingsPalette.actionButtonSurface,
+                    in: Capsule()
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(SettingsPalette.actionBorder, lineWidth: 1)
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
     }
 }
 
@@ -2826,8 +3057,8 @@ struct AppSurfaceBackground: View {
 }
 
 private enum SettingsPalette {
-    static let pageTop = adaptiveColor(light: NSColor(red: 0.97, green: 0.96, blue: 0.94, alpha: 1), dark: NSColor(red: 0.07, green: 0.09, blue: 0.12, alpha: 1))
-    static let pageBottom = adaptiveColor(light: NSColor(red: 0.92, green: 0.90, blue: 0.86, alpha: 1), dark: NSColor(red: 0.04, green: 0.05, blue: 0.07, alpha: 1))
+    static let pageTop = adaptiveColor(light: NSColor(red: 0.96, green: 0.96, blue: 0.98, alpha: 1), dark: NSColor(red: 0.07, green: 0.09, blue: 0.12, alpha: 1))
+    static let pageBottom = adaptiveColor(light: NSColor(red: 0.90, green: 0.91, blue: 0.95, alpha: 1), dark: NSColor(red: 0.04, green: 0.05, blue: 0.07, alpha: 1))
     static let pageGlow = adaptiveColor(light: NSColor(red: 0.38, green: 0.63, blue: 0.94, alpha: 0.14), dark: NSColor(red: 0.12, green: 0.22, blue: 0.31, alpha: 0.28))
     static let surface = adaptiveColor(light: NSColor(red: 1.00, green: 1.00, blue: 1.00, alpha: 0.84), dark: NSColor(red: 0.12, green: 0.14, blue: 0.17, alpha: 0.96))
     static let surfaceRaised = adaptiveColor(light: NSColor(red: 0.98, green: 0.98, blue: 0.99, alpha: 0.94), dark: NSColor(red: 0.14, green: 0.16, blue: 0.19, alpha: 0.96))
@@ -2887,6 +3118,10 @@ private enum SettingsPalette {
     static let purpleChipBorder = adaptiveColor(light: NSColor(red: 0.49, green: 0.34, blue: 0.72, alpha: 0.16), dark: NSColor(red: 0.80, green: 0.68, blue: 0.94, alpha: 0.18))
     static let purpleText = adaptiveColor(light: NSColor(red: 0.34, green: 0.22, blue: 0.60, alpha: 1), dark: NSColor(red: 0.80, green: 0.68, blue: 0.94, alpha: 1))
 
+    static let thresholdEarly = adaptiveColor(light: NSColor(red: 0.05, green: 0.52, blue: 0.50, alpha: 1), dark: NSColor(red: 0.31, green: 0.89, blue: 0.79, alpha: 1))
+    static let thresholdWarn = adaptiveColor(light: NSColor(red: 0.74, green: 0.46, blue: 0.09, alpha: 1), dark: NSColor(red: 0.98, green: 0.75, blue: 0.38, alpha: 1))
+    static let thresholdCritical = adaptiveColor(light: NSColor(red: 0.72, green: 0.24, blue: 0.27, alpha: 1), dark: NSColor(red: 0.98, green: 0.56, blue: 0.57, alpha: 1))
+
     static let orangeFill = Color(red: 0.87, green: 0.46, blue: 0.33)
     static let orangeFillDark = Color(red: 0.66, green: 0.27, blue: 0.18)
 }
@@ -2902,11 +3137,11 @@ private struct SettingsAccentIcon: View {
 
     var body: some View {
         ZStack {
-            Circle()
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(backgroundFill)
                 .frame(width: 36, height: 36)
                 .overlay(
-                    Circle()
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
                         .stroke(SettingsPalette.border, lineWidth: 1)
                 )
 

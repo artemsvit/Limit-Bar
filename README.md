@@ -20,7 +20,7 @@ Gemini scaffolding exists in the codebase, but the shipped app currently focuses
 
 ## Download
 
-Latest release: [Limit Bar 1.0.6 DMG](https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.6/Limit-Bar-1.0.6.dmg)
+Latest release: [Limit Bar 1.0.7 DMG](https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.7/Limit-Bar-1.0.7.dmg)
 
 Release notes: [Limit Bar release history](https://limitbar.artsvit.com/releases/)
 
@@ -54,8 +54,8 @@ Project layout:
 Useful release scripts:
 
 ```sh
-scripts/build-signed-dmg.sh 1.0.6 7
-scripts/publish-release.sh 1.0.6 7
+scripts/build-signed-dmg.sh 1.0.7 8
+scripts/publish-release.sh 1.0.7 8
 ```
 
 `build-signed-dmg.sh` produces the signed distribution artifacts. `publish-release.sh` publishes the GitHub release assets and Sparkle appcast.

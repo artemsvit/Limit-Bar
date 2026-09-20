@@ -58,7 +58,17 @@ if [[ -z "${SPARKLE_PRIVATE_KEY:-}" ]]; then
   SPARKLE_PRIVATE_KEY="$(<"$TEMP_PRIVATE_KEY_PATH")"
 fi
 
-if [[ "${UNSIGNED_RELEASE:-0}" == "1" ]]; then
+DIST_ROOT="$ROOT_DIR/build/distribution/v${VERSION}"
+PREBUILT_APP="${PREBUILT_APP:-$DIST_ROOT/${APP_NAME}.xcarchive/Products/Applications/${APP_NAME}.app}"
+PREBUILT_DMG="${PREBUILT_DMG:-$DIST_ROOT/artifacts/Limit-Bar-${VERSION}.dmg}"
+
+if [[ -d "$PREBUILT_APP" ]]; then
+  # build-signed-dmg.sh already produced a Developer ID signed (and, with NOTARIZE=1,
+  # notarized and stapled) app. Ship that exact build so the in-app update and the DMG
+  # are the same binary instead of archiving a second, differently signed copy.
+  echo "Using prebuilt app: $PREBUILT_APP"
+  APP_PATH="$PREBUILT_APP"
+elif [[ "${UNSIGNED_RELEASE:-0}" == "1" ]]; then
   DERIVED_DATA="$ARCHIVE_ROOT/DerivedData"
   xcodebuild build \
     -project "$PROJECT" \
@@ -72,6 +82,8 @@ if [[ "${UNSIGNED_RELEASE:-0}" == "1" ]]; then
     SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY"
   APP_PATH="$DERIVED_DATA/Build/Products/Release/${APP_NAME}.app"
 else
+  TEAM_ID="${TEAM_ID:-8KK8V96Q6B}"
+  DEVELOPER_ID_APPLICATION="${DEVELOPER_ID_APPLICATION:-Developer ID Application: Artem Svitelskyi (${TEAM_ID})}"
   xcodebuild archive \
     -project "$PROJECT" \
     -scheme "$SCHEME" \
@@ -80,8 +92,25 @@ else
     MARKETING_VERSION="$VERSION" \
     CURRENT_PROJECT_VERSION="$BUILD" \
     SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
-    SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY"
+    SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY" \
+    CODE_SIGN_STYLE=Manual \
+    CODE_SIGN_IDENTITY="$DEVELOPER_ID_APPLICATION" \
+    DEVELOPMENT_TEAM="$TEAM_ID" \
+    OTHER_CODE_SIGN_FLAGS="--timestamp"
   APP_PATH="$ARCHIVE_PATH/Products/Applications/${APP_NAME}.app"
+fi
+
+if [[ "${UNSIGNED_RELEASE:-0}" != "1" ]]; then
+  echo "Verifying update payload signature..."
+  if ! codesign -dvvv "$APP_PATH" 2>&1 | grep -q "Authority=Developer ID Application"; then
+    echo "Refusing to publish: $APP_PATH is not signed with a Developer ID Application certificate."
+    echo "Sparkle would hand users a build Gatekeeper rejects. Run scripts/build-signed-dmg.sh first."
+    exit 70
+  fi
+  if ! xcrun stapler validate "$APP_PATH" >/dev/null 2>&1; then
+    echo "WARNING: $APP_PATH has no stapled notarization ticket."
+    echo "Re-run with NOTARIZE=1 scripts/build-signed-dmg.sh $VERSION $BUILD for a Gatekeeper-ready update."
+  fi
 fi
 
 ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
@@ -113,11 +142,15 @@ printf '%s' "$SPARKLE_PRIVATE_KEY" | Vendor/Sparkle/bin/generate_appcast \
   --maximum-versions 1 \
   "$UPDATES_DIR"
 
+RELEASE_ASSETS=("$ZIP_PATH" "$RELEASE_BODY_PATH" "$NOTES_PATH" "$APPCAST_PATH")
+if [[ -f "$PREBUILT_DMG" ]]; then
+  RELEASE_ASSETS+=("$PREBUILT_DMG")
+else
+  echo "WARNING: no DMG found at $PREBUILT_DMG; publishing without one."
+fi
+
 gh release create "$TAG" \
-  "$ZIP_PATH" \
-  "$RELEASE_BODY_PATH" \
-  "$NOTES_PATH" \
-  "$APPCAST_PATH" \
+  "${RELEASE_ASSETS[@]}" \
   --repo "$REPO" \
   --title "$RELEASE_NAME" \
   --notes-file "$RELEASE_BODY_PATH"

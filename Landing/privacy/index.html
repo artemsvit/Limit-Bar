@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Limit Bar — Privacy Policy</title>
+  <meta name="description" content="Privacy policy for Limit Bar, a local-first macOS menu bar app. No accounts, no analytics, and no data collection.">
+  <meta name="theme-color" content="#dfe2f6">
+  <link rel="canonical" href="https://limitbar.artsvit.com/privacy/">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="Limit Bar — Privacy Policy">
+  <meta property="og:description" content="Limit Bar runs entirely on your Mac. No accounts, no analytics, no data collection.">
+  <meta property="og:url" content="https://limitbar.artsvit.com/privacy/">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="shortcut icon" href="/favicon.ico" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="../styles.css?v=20260920-2">
+</head>
+<body class="release-page">
+  <header class="site-header" aria-label="Primary">
+    <div class="site-header-inner">
+      <a class="brand" href="../" aria-label="Limit Bar home">
+        <img src="../assets/app-icon.png" alt="" class="brand-icon" width="38" height="38" fetchpriority="high">
+        <span translate="no">Limit Bar</span>
+      </a>
+      <div class="header-actions">
+        <a class="primary-button" href="https://github.com/artemsvit/Limit-Bar/releases/latest" aria-label="Download Limit Bar for macOS" target="_blank" rel="noopener noreferrer">
+          <span class="button-icon" aria-hidden="true"><i data-lucide="download"></i></span>
+          Download
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main class="release-shell">
+    <article class="release-card doc-card">
+      <p class="eyebrow">Legal</p>
+      <h1>Privacy Policy</h1>
+      <p class="release-lede">Limit Bar runs entirely on your Mac. It has no account system, no analytics, and no server of its own.</p>
+
+      <p class="doc-summary">The short version: Limit Bar reads usage information that is already on your computer and shows it in your menu bar. It does not transmit that information anywhere.</p>
+
+      <section class="doc-section">
+        <h2>What Limit Bar collects</h2>
+        <p>Nothing. Limit Bar has no accounts, no sign-in, no telemetry, no analytics, no advertising, and no crash reporting. The app contains no third-party tracking code.</p>
+      </section>
+
+      <section class="doc-section">
+        <h2>How usage data is read</h2>
+        <p>To show your remaining balance, Limit Bar runs the provider command line tools that are already installed on your Mac — Codex, Claude Code, and Antigravity — and reads the usage information they report locally.</p>
+        <ul class="detail-list">
+          <li>Limit Bar never asks for your provider passwords or API keys</li>
+          <li>It does not read browser cookies or scrape provider websites</li>
+          <li>It uses the sessions those tools have already established</li>
+        </ul>
+        <p>Those command line tools are third-party software. When Limit Bar asks one of them for your usage, that tool may contact its own provider, exactly as it would if you ran it yourself in a terminal. Any such request is governed by that provider's own privacy policy, not this one.</p>
+      </section>
+
+      <section class="doc-section">
+        <h2>What stays on your Mac</h2>
+        <p>Usage percentages, reset times, and any account or plan label a provider tool reports are held in memory and in standard macOS user preferences on your own computer. This information is never sent to the developer or to any third party. Removing the app removes its use of that data.</p>
+      </section>
+
+      <section class="doc-section">
+        <h2>Network activity</h2>
+        <p>The Limit Bar app itself makes no network requests. There are only two ways network traffic can result from using it:</p>
+        <ul class="detail-list">
+          <li><strong>Software updates.</strong> Limit Bar uses Sparkle to check a public update feed hosted on GitHub Releases. As with any web request, GitHub receives standard connection information such as your IP address. Updates are cryptographically signed and the signature is verified before anything is installed.</li>
+          <li><strong>Provider tools.</strong> Any request made by the Codex, Claude Code, or Antigravity command line tools themselves, as described above.</li>
+        </ul>
+        <p>You can stop update checks at any time by not using Check for Updates.</p>
+      </section>
+
+      <section class="doc-section">
+        <h2>Notifications</h2>
+        <p>If you turn on usage notifications, alerts are produced locally by macOS on your own machine. No push notification service is involved and no notification content leaves your Mac.</p>
+      </section>
+
+      <section class="doc-section">
+        <h2>Children</h2>
+        <p>Limit Bar is a developer utility and is not directed at children. It collects no personal information from anyone, including children.</p>
+      </section>
+
+      <section class="doc-section">
+        <h2>Changes to this policy</h2>
+        <p>If this policy changes, the updated version will be published on this page with a new effective date. Material changes will also be noted in the release notes.</p>
+      </section>
+
+      <section class="doc-section">
+        <h2>Contact</h2>
+        <p>Questions about privacy can go to <a class="doc-link" href="mailto:a.svitelskyi@gmail.com">a.svitelskyi@gmail.com</a>, or you can open an issue on <a class="doc-link" href="https://github.com/artemsvit/Limit-Bar/issues" target="_blank" rel="noopener noreferrer">GitHub</a>.</p>
+      </section>
+
+      <p class="release-meta">Effective 20 September 2026. Limit Bar is developed by Artem Svitelskyi.</p>
+    </article>
+  </main>
+
+  <footer>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="https://github.com/artemsvit/Limit-Bar" target="_blank" rel="noopener noreferrer">GitHub</a>
+      <a href="/releases/">Release notes</a>
+      <a href="/support/">Support</a>
+      <span class="footer-current" aria-current="page">Privacy</span>
+    </nav>
+    <span class="footer-credit" translate="no">Limit Bar by <a href="https://artsvit.com" target="_blank" rel="noopener noreferrer">Artem Svitelskyi</a></span>
+  </footer>
+  <script src="https://unpkg.com/lucide@0.542.0/dist/umd/lucide.min.js"></script>
+  <script>lucide.createIcons({ attrs: { class: "lucide-icon", "aria-hidden": "true" } });</script>
+</body>
+</html>

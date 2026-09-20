@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Limit Bar - macOS menu bar app for AI usage tracking</title>
   <meta name="description" content="Limit Bar is a macOS menu bar app for tracking Codex, Claude Code, and Antigravity usage with reset times, low-balance alerts, and local session monitoring.">
-  <meta name="theme-color" content="#f5efe4">
+  <meta name="theme-color" content="#dfe2f6">
   <meta name="robots" content="index, follow">
   <meta name="application-name" content="Limit Bar">
   <meta name="apple-mobile-web-app-title" content="Limit Bar">
@@ -28,13 +28,13 @@
   <meta name="twitter:image:alt" content="Limit Bar preview showing menu bar usage tracking for Codex, Claude Code, and Antigravity">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="shortcut icon" href="/favicon.ico" />
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/site.webmanifest" />
-  <link rel="stylesheet" href="styles.css?v=20260906-3">
+  <link rel="stylesheet" href="styles.css?v=20260920-2">
   <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -51,7 +51,7 @@
           "name": "Limit Bar",
           "applicationCategory": "UtilitiesApplication",
           "operatingSystem": "macOS 15.6+",
-          "softwareVersion": "1.0.6",
+          "softwareVersion": "1.0.7",
           "description": "Limit Bar is a macOS menu bar app for tracking Codex, Claude Code, and Antigravity usage, reset timers, and low-balance alerts from local CLI sessions.",
           "url": "https://limitbar.artsvit.com/",
           "downloadUrl": "https://github.com/artemsvit/Limit-Bar/releases/latest",
@@ -117,7 +117,7 @@
       <div class="header-actions">
         <a
           class="primary-button"
-          href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.6/Limit-Bar-1.0.6.dmg"
+          href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.7/Limit-Bar-1.0.7.dmg"
           data-release-download
           aria-label="Download Limit Bar for macOS"
           target="_blank"
@@ -139,7 +139,7 @@
         <div class="hero-actions">
           <a
             class="primary-button"
-            href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.6/Limit-Bar-1.0.6.dmg"
+            href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.7/Limit-Bar-1.0.7.dmg"
             data-release-download
             aria-label="Download Limit Bar for macOS"
             target="_blank"
@@ -175,17 +175,17 @@
 
       <div class="hero-visual" aria-label="Limit Bar interface preview">
         <div class="mac-window">
-          <article class="usage-card">
-            <div class="window-header">
-              <strong>AI Usage Limits</strong>
-              <span class="window-actions" aria-hidden="true">
-                <i data-lucide="settings"></i>
-                <i data-lucide="power"></i>
-              </span>
-            </div>
+          <div class="window-header">
+            <strong>AI Usage Limits</strong>
+            <span class="window-actions" aria-hidden="true">
+              <i data-lucide="settings"></i>
+              <i data-lucide="power"></i>
+            </span>
+          </div>
 
+          <article class="usage-card">
             <div class="service-row">
-              <img src="assets/codex.png" alt="" class="service-icon" width="46" height="46">
+              <img src="assets/codex.png" alt="" class="service-icon" width="30" height="30">
               <strong>Codex</strong>
             </div>
 
@@ -206,6 +206,31 @@
               <span class="progress-fill fill-weekly" style="--fill: 0.58"></span>
             </div>
             <p class="reset-copy">Resets in 4d</p>
+          </article>
+
+          <article class="usage-card">
+            <div class="service-row">
+              <img src="assets/claude-code.png" alt="" class="service-icon" width="30" height="30">
+              <strong>Claude Code</strong>
+            </div>
+
+            <div class="metric-row">
+              <span class="percent">92%</span>
+              <span class="chip chip-current">Current</span>
+            </div>
+            <div class="progress-track">
+              <span class="progress-fill fill-current" style="--fill: 0.92"></span>
+            </div>
+            <p class="reset-copy">Resets in 3h</p>
+
+            <div class="metric-row metric-row-late">
+              <span class="percent">64%</span>
+              <span class="chip chip-weekly">Weekly</span>
+            </div>
+            <div class="progress-track">
+              <span class="progress-fill fill-weekly" style="--fill: 0.64"></span>
+            </div>
+            <p class="reset-copy">Resets in 6d</p>
           </article>
         </div>
       </div>
@@ -335,7 +360,7 @@
       </div>
       <a
         class="primary-button"
-        href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.6/Limit-Bar-1.0.6.dmg"
+        href="https://github.com/artemsvit/Limit-Bar/releases/download/v1.0.7/Limit-Bar-1.0.7.dmg"
         data-release-download
         target="_blank"
         rel="noopener noreferrer"
@@ -353,6 +378,8 @@
         GitHub
       </a>
       <a href="/releases/">Release notes</a>
+      <a href="/support/">Support</a>
+      <a href="/privacy/">Privacy</a>
     </nav>
     <span class="footer-credit" translate="no">Limit Bar by <a href="https://artsvit.com" target="_blank" rel="noopener noreferrer">Artem Svitelskyi</a></span>
   </footer>
