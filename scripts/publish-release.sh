@@ -102,7 +102,10 @@ fi
 
 if [[ "${UNSIGNED_RELEASE:-0}" != "1" ]]; then
   echo "Verifying update payload signature..."
-  if ! codesign -dvvv "$APP_PATH" 2>&1 | grep -q "Authority=Developer ID Application"; then
+  # Keep this out of a pipeline: `grep -q` exits on first match and the resulting
+  # SIGPIPE trips `set -o pipefail`, which would fail a perfectly good signature.
+  SIGNATURE_INFO="$(codesign -dvvv "$APP_PATH" 2>&1 || true)"
+  if [[ "$SIGNATURE_INFO" != *"Authority=Developer ID Application"* ]]; then
     echo "Refusing to publish: $APP_PATH is not signed with a Developer ID Application certificate."
     echo "Sparkle would hand users a build Gatekeeper rejects. Run scripts/build-signed-dmg.sh first."
     exit 70
