@@ -2929,9 +2929,29 @@ struct CompactBalanceRow: View {
 
     private var compactResetText: String {
         guard let balance else { return "Waiting for balance" }
-        let relative = RelativeDateTimeFormatter()
-        relative.unitsStyle = .abbreviated
-        return "Resets in \(relative.localizedString(for: balance.resetsAt, relativeTo: Date()))"
+
+        let remaining = balance.resetsAt.timeIntervalSinceNow
+        guard remaining > 0 else { return "Resets now" }
+        guard remaining >= 60 else { return "Resets in <1m" }
+
+        // RelativeDateTimeFormatter returns a whole phrase ("in 4h"), which read as
+        // "Resets in in 4h" once prefixed. Format the duration on its own instead.
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.maximumUnitCount = 1
+        formatter.allowedUnits = if remaining >= 86_400 {
+            [.day, .hour]
+        } else if remaining >= 3_600 {
+            [.hour, .minute]
+        } else {
+            [.minute]
+        }
+
+        guard let duration = formatter.string(from: remaining), !duration.isEmpty else {
+            return "Resets soon"
+        }
+
+        return "Resets in \(duration)"
     }
 
 }
