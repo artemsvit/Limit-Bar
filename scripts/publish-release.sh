@@ -12,7 +12,8 @@ SPARKLE_ACCOUNT="limit-bar"
 FEED_TAG="updates"
 SPARKLE_FEED_URL="https://github.com/${REPO}/releases/download/${FEED_TAG}/appcast.xml"
 SPARKLE_PUBLIC_ED_KEY="96VpvrwjTO2r7k7pmBJdFzPVvDeYPbO+uXpPqEuoXzU="
-PUBLIC_RELEASE_NOTES_URL_PREFIX="https://limitbar.artsvit.com/releases/"
+PUBLIC_SITE_URL="https://limitbar.artsvit.com/"
+FULL_RELEASE_NOTES_URL="https://limitbar.artsvit.com/releases/"
 
 VERSION="${1:-}"
 BUILD="${2:-}"
@@ -36,8 +37,10 @@ EXPORT_DIR="$ARCHIVE_ROOT/export"
 UPDATES_DIR="$ARCHIVE_ROOT/updates"
 ZIP_NAME="Limit-Bar-${VERSION}.zip"
 ZIP_PATH="$UPDATES_DIR/$ZIP_NAME"
-RELEASE_BODY_PATH="$UPDATES_DIR/Limit-Bar-${VERSION}.md"
-NOTES_PATH="$UPDATES_DIR/Limit-Bar-${VERSION}.html"
+# The GitHub release body lives outside UPDATES_DIR: generate_appcast matches a
+# notes file to an archive by filename, and the embedded copy is trimmed.
+RELEASE_BODY_PATH="$ARCHIVE_ROOT/Limit-Bar-${VERSION}.md"
+EMBEDDED_NOTES_PATH="$UPDATES_DIR/Limit-Bar-${VERSION}.md"
 APPCAST_PATH="$UPDATES_DIR/appcast.xml"
 
 rm -rf "$ARCHIVE_ROOT"
@@ -129,27 +132,24 @@ Release ${VERSION} (${BUILD}).
 EOF
 fi
 
-# Regenerate the compact page Sparkle shows in its update dialog, so the notes
-# in the app always match the Markdown release body.
-python3 "$ROOT_DIR/scripts/make-release-notes.py" "$VERSION"
-
-RELEASE_PAGE_SOURCE="$ROOT_DIR/Landing/releases/Limit-Bar-${VERSION}.html"
-if [[ ! -f "$RELEASE_PAGE_SOURCE" ]]; then
-  echo "Missing public release page: $RELEASE_PAGE_SOURCE"
-  exit 67
-fi
-cp "$RELEASE_PAGE_SOURCE" "$NOTES_PATH"
+# Sparkle embeds these notes straight into the appcast and renders them with its
+# own styling, so the update dialog no longer depends on the website being up.
+# The dialog header already names the version, so drop the leading H1.
+awk 'NR==1 && /^# / { next } NR<=2 && NF==0 { next } { print }' \
+  "$RELEASE_BODY_PATH" > "$EMBEDDED_NOTES_PATH"
 
 RELEASE_ASSET_PREFIX="https://github.com/${REPO}/releases/download/${TAG}/"
 
 printf '%s' "$SPARKLE_PRIVATE_KEY" | Vendor/Sparkle/bin/generate_appcast \
   --ed-key-file - \
   --download-url-prefix "$RELEASE_ASSET_PREFIX" \
-  --release-notes-url-prefix "$PUBLIC_RELEASE_NOTES_URL_PREFIX" \
+  --embed-release-notes \
+  --full-release-notes-url "$FULL_RELEASE_NOTES_URL" \
+  --link "$PUBLIC_SITE_URL" \
   --maximum-versions 1 \
   "$UPDATES_DIR"
 
-RELEASE_ASSETS=("$ZIP_PATH" "$RELEASE_BODY_PATH" "$NOTES_PATH" "$APPCAST_PATH")
+RELEASE_ASSETS=("$ZIP_PATH" "$RELEASE_BODY_PATH" "$APPCAST_PATH")
 if [[ -f "$PREBUILT_DMG" ]]; then
   RELEASE_ASSETS+=("$PREBUILT_DMG")
 else
