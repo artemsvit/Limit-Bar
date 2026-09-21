@@ -97,6 +97,17 @@ enum LimitService: String, CaseIterable, Codable, Identifiable {
         case .gemini: return "Ge"
         }
     }
+
+    /// Brand hue for the menu bar marker. Colour alone never carries the meaning - the
+    /// tooltip and the popover always name the provider.
+    var markerColor: NSColor {
+        switch self {
+        case .claude: return NSColor(red: 0.85, green: 0.45, blue: 0.32, alpha: 1)
+        case .codex: return NSColor(red: 0.45, green: 0.44, blue: 0.95, alpha: 1)
+        case .antigravity: return NSColor(red: 0.31, green: 0.66, blue: 0.45, alpha: 1)
+        case .gemini: return NSColor(red: 0.36, green: 0.55, blue: 0.92, alpha: 1)
+        }
+    }
 }
 
 struct NotificationPreferences: Codable, Equatable {
@@ -1767,7 +1778,7 @@ struct ServiceActionPill: View {
             return SettingsPalette.greenFill.opacity(0.08)
         }
         if disconnectedTitle == "Connect" {
-            return SettingsPalette.blueFill.opacity(isHovering ? 0.10 : 0.06)
+            return SettingsPalette.accentGlow.opacity(isHovering ? 0.10 : 0.06)
         }
         return .black.opacity(0.12)
     }
@@ -1846,7 +1857,7 @@ struct UpdateActionPill: View {
     }
 
     private var shadowColor: Color {
-        isEnabled ? SettingsPalette.blueFill.opacity(isHovering ? 0.10 : 0.06) : .clear
+        isEnabled ? SettingsPalette.accentGlow.opacity(isHovering ? 0.10 : 0.06) : .clear
     }
 }
 
@@ -2582,7 +2593,7 @@ struct SettingsWindowView: View {
 
     private var automaticUpdatesRow: some View {
         HStack(spacing: 10) {
-            SettingsAccentIcon(systemName: "arrow.triangle.2.circlepath", tint: .blue)
+            SettingsAccentIcon(systemName: "arrow.triangle.2.circlepath", tint: .accent)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Automatic update checks")
@@ -2613,7 +2624,7 @@ struct SettingsWindowView: View {
 
     private var startAtLoginRow: some View {
         HStack(spacing: 10) {
-            SettingsAccentIcon(systemName: "power", tint: .blue)
+            SettingsAccentIcon(systemName: "power", tint: .accent)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Start at login")
@@ -2638,7 +2649,7 @@ struct SettingsWindowView: View {
 
     private var menuBarDisplayRow: some View {
         HStack(spacing: 10) {
-            SettingsAccentIcon(systemName: "percent", tint: .blue)
+            SettingsAccentIcon(systemName: "percent", tint: .accent)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Show current percent")
@@ -2660,7 +2671,7 @@ struct SettingsWindowView: View {
     private var notificationCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                SettingsAccentIcon(systemName: "bell", tint: .blue)
+                SettingsAccentIcon(systemName: "bell", tint: .accent)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Usage notifications")
@@ -2855,7 +2866,13 @@ struct BrandedLoginToggleStyle: ToggleStyle {
 
     private func trackFill(isOn: Bool) -> AnyShapeStyle {
         if isOn {
-            AnyShapeStyle(SettingsPalette.blueToggleSurface)
+            AnyShapeStyle(
+                LinearGradient(
+                    colors: [SettingsPalette.accentToggleStart, SettingsPalette.accentToggleEnd],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
         } else {
             AnyShapeStyle(SettingsPalette.buttonSurface)
         }
@@ -3444,7 +3461,7 @@ private enum SettingsPalette {
     static let divider = adaptiveColor(light: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 0.10), dark: NSColor.white.withAlphaComponent(0.07))
     static let buttonSurface = adaptiveColor(light: NSColor(red: 0.95, green: 0.96, blue: 0.98, alpha: 0.96), dark: NSColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 0.96))
     static let inputSurface = adaptiveColor(light: NSColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 0.94), dark: NSColor(red: 0.16, green: 0.18, blue: 0.22, alpha: 0.96))
-    static let inputFocusBorder = adaptiveColor(light: NSColor(red: 0.14, green: 0.37, blue: 0.74, alpha: 0.36), dark: NSColor(red: 0.50, green: 0.70, blue: 1.00, alpha: 0.40))
+    static let inputFocusBorder = adaptiveColor(light: NSColor(red: 0.36, green: 0.32, blue: 0.88, alpha: 0.42), dark: NSColor(red: 0.70, green: 0.64, blue: 0.98, alpha: 0.48))
     static let trackTop = adaptiveColor(light: NSColor(red: 0.95, green: 0.96, blue: 0.98, alpha: 0.96), dark: NSColor.white.withAlphaComponent(0.05))
     static let trackBottom = adaptiveColor(light: NSColor(red: 0.84, green: 0.87, blue: 0.91, alpha: 0.92), dark: NSColor.black.withAlphaComponent(0.24))
     static let trackBorder = adaptiveColor(light: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 0.10), dark: NSColor.white.withAlphaComponent(0.08))
@@ -3456,17 +3473,16 @@ private enum SettingsPalette {
     static let knobOn = adaptiveColor(light: NSColor.white.withAlphaComponent(0.98), dark: NSColor.white.withAlphaComponent(0.96))
     static let knobOff = adaptiveColor(light: NSColor(red: 0.99, green: 0.99, blue: 1.00, alpha: 1), dark: NSColor.white.withAlphaComponent(0.86))
 
-    static let blueFill = Color(red: 0.28, green: 0.56, blue: 0.93)
-    static let blueFillDark = Color(red: 0.14, green: 0.37, blue: 0.74)
-    static let blueButtonSurface = adaptiveColor(light: NSColor(red: 0.87, green: 0.92, blue: 0.98, alpha: 1), dark: NSColor(red: 0.16, green: 0.24, blue: 0.35, alpha: 1))
-    static let blueButtonSurfaceHover = adaptiveColor(light: NSColor(red: 0.82, green: 0.89, blue: 0.97, alpha: 1), dark: NSColor(red: 0.18, green: 0.28, blue: 0.41, alpha: 1))
-    static let blueToggleSurface = adaptiveColor(light: NSColor(red: 0.72, green: 0.82, blue: 0.94, alpha: 1), dark: NSColor(red: 0.20, green: 0.32, blue: 0.48, alpha: 1))
-    static let blueAccentIconSurface = adaptiveColor(light: NSColor(red: 0.87, green: 0.92, blue: 0.98, alpha: 1), dark: NSColor(red: 0.13, green: 0.23, blue: 0.36, alpha: 1))
-    static let blueText = adaptiveColor(light: NSColor(red: 0.13, green: 0.34, blue: 0.63, alpha: 1), dark: NSColor(red: 0.84, green: 0.92, blue: 1.00, alpha: 1))
-    static let actionButtonSurface = adaptiveColor(light: NSColor(red: 0.90, green: 0.94, blue: 0.98, alpha: 1), dark: NSColor(red: 0.15, green: 0.21, blue: 0.29, alpha: 1))
-    static let actionButtonSurfaceHover = adaptiveColor(light: NSColor(red: 0.85, green: 0.91, blue: 0.97, alpha: 1), dark: NSColor(red: 0.17, green: 0.25, blue: 0.35, alpha: 1))
-    static let actionBorder = adaptiveColor(light: NSColor(red: 0.14, green: 0.37, blue: 0.62, alpha: 0.18), dark: NSColor(red: 0.58, green: 0.74, blue: 0.92, alpha: 0.18))
-    static let actionText = adaptiveColor(light: NSColor(red: 0.12, green: 0.34, blue: 0.58, alpha: 1), dark: NSColor(red: 0.74, green: 0.86, blue: 0.98, alpha: 1))
+    // Accent matches the landing page: --accent #5b52e0 through #8b73ef.
+    static let accentGlow = Color(red: 0.357, green: 0.322, blue: 0.878)
+    static let accentToggleStart = Color(red: 0.357, green: 0.322, blue: 0.878)
+    static let accentToggleEnd = Color(red: 0.545, green: 0.451, blue: 0.937)
+    static let accentIconSurface = adaptiveColor(light: NSColor(red: 0.91, green: 0.89, blue: 0.99, alpha: 1), dark: NSColor(red: 0.19, green: 0.17, blue: 0.35, alpha: 1))
+    static let accentIconGlyph = adaptiveColor(light: NSColor(red: 0.34, green: 0.26, blue: 0.62, alpha: 1), dark: NSColor(red: 0.78, green: 0.73, blue: 1.00, alpha: 1))
+    static let actionButtonSurface = adaptiveColor(light: NSColor(red: 0.91, green: 0.90, blue: 0.99, alpha: 1), dark: NSColor(red: 0.19, green: 0.17, blue: 0.34, alpha: 1))
+    static let actionButtonSurfaceHover = adaptiveColor(light: NSColor(red: 0.87, green: 0.85, blue: 0.98, alpha: 1), dark: NSColor(red: 0.23, green: 0.20, blue: 0.40, alpha: 1))
+    static let actionBorder = adaptiveColor(light: NSColor(red: 0.36, green: 0.32, blue: 0.88, alpha: 0.22), dark: NSColor(red: 0.70, green: 0.64, blue: 0.98, alpha: 0.24))
+    static let actionText = adaptiveColor(light: NSColor(red: 0.29, green: 0.25, blue: 0.71, alpha: 1), dark: NSColor(red: 0.80, green: 0.75, blue: 1.00, alpha: 1))
 
     static let greenFill = Color(red: 0.25, green: 0.58, blue: 0.39)
     static let greenFillDark = Color(red: 0.16, green: 0.41, blue: 0.27)
@@ -3503,7 +3519,7 @@ private enum SettingsPalette {
 }
 
 private enum SettingsAccentTint {
-    case blue
+    case accent
     case purple
 }
 
@@ -3528,11 +3544,11 @@ private struct SettingsAccentIcon: View {
     }
 
     private var backgroundFill: some ShapeStyle {
-        tint == .blue ? SettingsPalette.blueAccentIconSurface : SettingsPalette.purpleAccentIconSurface
+        tint == .accent ? SettingsPalette.accentIconSurface : SettingsPalette.purpleAccentIconSurface
     }
 
     private var foregroundColor: Color {
-        tint == .blue ? SettingsPalette.blueText : SettingsPalette.purpleText
+        tint == .accent ? SettingsPalette.accentIconGlyph : SettingsPalette.purpleText
     }
 }
 

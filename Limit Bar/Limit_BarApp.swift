@@ -183,7 +183,10 @@ final class StatusBarController: NSObject {
         }
         let current = connected.compactMap { $0.current?.remainingPercent }.min() ?? 0
         let hasConnection = !connected.isEmpty
-        iconView.update(services: connected)
+        iconView.update(
+            services: connected,
+            layout: (displayMode ?? displayPreferences.mode) == .currentPercent ? .percent : .bars
+        )
         updateStatusButton(
             currentPercent: current,
             hasConnection: hasConnection,
@@ -200,100 +203,240 @@ final class StatusBarController: NSObject {
     ) {
         guard let button = statusItem.button else { return }
 
-        switch displayMode {
-        case .bars:
-            statusItem.length = CGFloat(max(connectedServices.count, 1)) * 24
-            button.title = ""
-            button.attributedTitle = NSAttributedString()
-            let summary = connectedServices.map { service in
-                let current = service.current.map { "\($0.remainingPercent)%" } ?? "unavailable"
-                let weekly = service.weekly.map { "\($0.remainingPercent)%" } ?? "unavailable"
-                return "\(service.id.shortName): current \(current), weekly \(weekly) remaining"
-            }.joined(separator: "\n")
-            button.toolTip = summary.isEmpty ? "Limit Bar" : summary
-            button.setAccessibilityLabel(summary.isEmpty ? "Limit Bar" : "Limit Bar. \(summary)")
-            iconView.isHidden = false
-            iconView.frame = button.bounds
+        // Both modes are drawn by iconView now, so the status item never resizes from a
+        // measured string - the width comes from fixed slots instead.
+        let layout: UsageStatusIconView.Layout = displayMode == .currentPercent ? .percent : .bars
 
-        case .currentPercent:
-            button.setAccessibilityLabel("Limit Bar")
-            iconView.isHidden = true
-            let title: String
-            if connectedServices.count > 1 {
-                let preferredOrder: [LimitService] = [.claude, .codex, .antigravity, .gemini]
-                let orderedServices = connectedServices.sorted {
-                    (preferredOrder.firstIndex(of: $0.id) ?? .max) <
-                    (preferredOrder.firstIndex(of: $1.id) ?? .max)
-                }
-                title = orderedServices.map { service in
-                    let percent = service.current.map { "\($0.remainingPercent)%" } ?? "--"
-                    return "\(service.id.menuBarAbbreviation):\(percent)"
-                }.joined(separator: " ")
-            } else {
-                title = hasConnection ? "\(currentPercent)%" : "--%"
-            }
-            let attributedTitle = NSAttributedString(
-                string: title,
-                attributes: [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .semibold),
-                    .foregroundColor: NSColor.labelColor
-                ]
-            )
-            statusItem.length = ceil(attributedTitle.size().width) + 12
-            button.attributedTitle = attributedTitle
-            button.toolTip = connectedServices.count > 1
-                ? connectedServices
-                    .sorted { $0.id.shortName < $1.id.shortName }
-                    .map { service in
-                        let percent = service.current.map { "\($0.remainingPercent)%" } ?? "--"
-                        return "\(service.id.shortName): \(percent) remaining"
-                    }
-                    .joined(separator: " · ")
-                : (hasConnection ? "Current usage remaining: \(currentPercent)%" : "Limit Bar")
-        }
+        button.title = ""
+        button.attributedTitle = NSAttributedString()
+        iconView.isHidden = false
+
+        statusItem.length = UsageStatusIconView.width(for: connectedServices, layout: layout)
+        iconView.frame = button.bounds
+
+        let summary = connectedServices.map { service in
+            let current = service.current.map { "\($0.remainingPercent)%" } ?? "unavailable"
+            let weekly = service.weekly.map { "\($0.remainingPercent)%" } ?? "unavailable"
+            return "\(service.id.shortName): session \(current), week \(weekly) remaining"
+        }.joined(separator: ". ")
+
+        button.setAccessibilityLabel(
+            summary.isEmpty
+                ? "Limit Bar. No provider connected."
+                : "Limit Bar. \(summary)"
+        )
+        _ = currentPercent
+        _ = hasConnection
     }
 }
 
-final class UsageStatusIconView: NSView {
+/// The menu bar content: one segment per connected provider, each a brand-coloured dot
+/// plus the current remaining percentage.
+///
+/// Percentages live in fixed-width slots. Sizing the status item from the measured string
+/// made the whole menu bar shift sideways whenever a value crossed a digit boundary
+/// (100% -> 7%), which is distracting when it happens on its own every refresh.
+final class UsageStatusIconView: NSView, NSViewToolTipOwner {
+    enum Layout {
+        /// Two vertical bars per provider: current and weekly.
+        case bars
+        /// Coloured dot plus current percentage per provider.
+        case percent
+    }
+
     private var services: [ServiceLimit] = []
+    /// Named to avoid colliding with NSView.layout().
+    private var segmentLayout: Layout = .bars
     private var hasConnection: Bool { !services.isEmpty }
+
+    /// Widest value we ever draw, so the slot never resizes.
+    private static let percentSlotText = "100"
+    private static let dotDiameter: CGFloat = 6
+    private static let dotTextGap: CGFloat = 4
+    private static let segmentGap: CGFloat = 8
+    /// Breathing room at the ends of the status item.
+    private static let horizontalInset: CGFloat = 8
+    private static let barGroupWidth: CGFloat = 24
 
     override var isFlipped: Bool { true }
 
-    func update(services: [ServiceLimit]) {
-        self.services = services
-        needsDisplay = true
+    private static var percentFont: NSFont {
+        .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize - 0.5, weight: .semibold)
     }
+
+    private static var percentSlotWidth: CGFloat {
+        ceil(NSAttributedString(
+            string: percentSlotText,
+            attributes: [.font: percentFont]
+        ).size().width)
+    }
+
+    /// Width the status item should reserve for the given providers.
+    static func width(for services: [ServiceLimit], layout: Layout) -> CGFloat {
+        let count = max(services.count, 1)
+        switch layout {
+        case .bars:
+            return CGFloat(count) * barGroupWidth
+        case .percent:
+            let segment = dotDiameter + dotTextGap + percentSlotWidth
+            return CGFloat(count) * segment + CGFloat(count - 1) * segmentGap + horizontalInset
+        }
+    }
+
+    func update(services: [ServiceLimit], layout: Layout) {
+        self.services = services
+        self.segmentLayout = layout
+        needsDisplay = true
+        rebuildToolTips()
+    }
+
+    // MARK: - Tooltips
+
+    /// A tooltip rect per segment, so hovering one provider explains that provider.
+    private func rebuildToolTips() {
+        removeAllToolTips()
+
+        guard segmentLayout == .percent, hasConnection else {
+            toolTip = summaryToolTip()
+            return
+        }
+
+        toolTip = nil
+        let segment = Self.dotDiameter + Self.dotTextGap + Self.percentSlotWidth
+        var x = (bounds.width - Self.width(for: services, layout: .percent) + Self.horizontalInset) / 2
+
+        for index in services.indices {
+            addToolTip(
+                NSRect(x: x - Self.segmentGap / 2, y: 0, width: segment + Self.segmentGap, height: bounds.height),
+                owner: self,
+                userData: nil
+            )
+            x += segment + Self.segmentGap
+            _ = index
+        }
+    }
+
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        guard let service = service(at: point) else { return summaryToolTip() ?? "Limit Bar" }
+        return Self.toolTipText(for: service)
+    }
+
+    private func service(at point: NSPoint) -> ServiceLimit? {
+        guard segmentLayout == .percent, hasConnection else { return nil }
+
+        let segment = Self.dotDiameter + Self.dotTextGap + Self.percentSlotWidth
+        let originX = (bounds.width - Self.width(for: services, layout: .percent) + Self.horizontalInset) / 2
+        let stride = segment + Self.segmentGap
+        let index = Int(floor((point.x - originX + Self.segmentGap / 2) / stride))
+
+        guard services.indices.contains(index) else { return nil }
+        return services[index]
+    }
+
+    private static func toolTipText(for service: ServiceLimit) -> String {
+        let current = service.current.map { "\($0.remainingPercent)%" } ?? "unavailable"
+        let weekly = service.weekly.map { "\($0.remainingPercent)%" } ?? "unavailable"
+        return "\(service.id.shortName)\nSession: \(current) left\nWeek: \(weekly) left"
+    }
+
+    private func summaryToolTip() -> String? {
+        guard hasConnection else { return "Limit Bar" }
+        return services.map(Self.toolTipText).joined(separator: "\n\n")
+    }
+
+    override func layout() {
+        super.layout()
+        rebuildToolTips()
+    }
+
+    // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
+        switch segmentLayout {
+        case .bars:
+            drawBars()
+        case .percent:
+            drawPercentSegments()
+        }
+    }
+
+    private func drawPercentSegments() {
+        guard hasConnection else {
+            drawPlaceholder()
+            return
+        }
+
+        let slotWidth = Self.percentSlotWidth
+        let segment = Self.dotDiameter + Self.dotTextGap + slotWidth
+        var x = (bounds.width - Self.width(for: services, layout: .percent) + Self.horizontalInset) / 2
+
+        for service in services {
+            let dotRect = NSRect(
+                x: x,
+                y: (bounds.height - Self.dotDiameter) / 2,
+                width: Self.dotDiameter,
+                height: Self.dotDiameter
+            )
+            service.id.markerColor.setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
+
+            let text = service.current.map { "\($0.remainingPercent)" } ?? "--"
+            let attributed = NSAttributedString(
+                string: text,
+                attributes: [
+                    .font: Self.percentFont,
+                    .foregroundColor: NSColor.labelColor
+                ]
+            )
+            // Right-align inside the fixed slot so digits stay put as values change.
+            let textSize = attributed.size()
+            let textX = x + Self.dotDiameter + Self.dotTextGap + (slotWidth - ceil(textSize.width))
+            attributed.draw(at: NSPoint(x: textX, y: (bounds.height - textSize.height) / 2))
+
+            x += segment + Self.segmentGap
+        }
+    }
+
+    private func drawPlaceholder() {
+        let attributed = NSAttributedString(
+            string: "--",
+            attributes: [
+                .font: Self.percentFont,
+                .foregroundColor: NSColor.labelColor.withAlphaComponent(0.55)
+            ]
+        )
+        let size = attributed.size()
+        attributed.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
+    }
+
+    private func drawBars() {
         let barWidth: CGFloat = 5
         let gap: CGFloat = 4
         let totalWidth = barWidth * 2 + gap
         let maxHeight: CGFloat = 15
         let count = max(services.count, 1)
-        let groupWidth: CGFloat = 24
-        let originX = (bounds.width - CGFloat(count) * groupWidth) / 2 + (groupWidth - totalWidth) / 2
+        let originX = (bounds.width - CGFloat(count) * Self.barGroupWidth) / 2 + (Self.barGroupWidth - totalWidth) / 2
         let originY = (bounds.height - maxHeight) / 2
 
         for index in 0..<count {
-        let service = services.isEmpty ? nil : services[index]
-        let x = originX + CGFloat(index) * groupWidth
-        drawBar(
-            x: x,
-            y: originY,
-            width: barWidth,
-            height: maxHeight,
-            percent: service?.current?.remainingPercent ?? 0
-        )
-        drawBar(
-            x: x + barWidth + gap,
-            y: originY,
-            width: barWidth,
-            height: maxHeight,
-            percent: service?.weekly?.remainingPercent ?? 0
-        )
+            let service = services.isEmpty ? nil : services[index]
+            let x = originX + CGFloat(index) * Self.barGroupWidth
+            drawBar(
+                x: x,
+                y: originY,
+                width: barWidth,
+                height: maxHeight,
+                percent: service?.current?.remainingPercent ?? 0
+            )
+            drawBar(
+                x: x + barWidth + gap,
+                y: originY,
+                width: barWidth,
+                height: maxHeight,
+                percent: service?.weekly?.remainingPercent ?? 0
+            )
         }
     }
 
