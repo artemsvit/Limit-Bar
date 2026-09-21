@@ -1528,10 +1528,90 @@ private extension String {
         }
     }
 
+    /// Reset times mentioned in CLI prose, in the order they appear in the text -
+    /// callers rely on index 0 being the first-mentioned window (typically the
+    /// session/current limit) and index 1 the second (typically weekly).
+    ///
+    /// Claude Code's plain `/usage` output moved from relative phrasing ("resets
+    /// in 4h") to an absolute wall-clock form ("resets Sep 21 at 12:10pm
+    /// (Europe/Kiev)") at some point after this parser was written; verified live
+    /// against claude 2.1.278, where the relative pattern no longer matches at
+    /// all and the fallback silently guessed a fixed 5h/7d reset instead of the
+    /// real one. Both forms are recognised here since either can appear
+    /// depending on the CLI build.
     func extractResetDates(now: Date = Date()) -> [Date] {
-        let relativeHours = matches(pattern: #"resets?\s+(?:in\s+)?([0-9]+)\s*h"#).compactMap { Double($0).map { now.addingTimeInterval($0 * 3600) } }
-        let relativeDays = matches(pattern: #"resets?\s+(?:in\s+)?([0-9]+)\s*d"#).compactMap { Double($0).map { now.addingTimeInterval($0 * 24 * 3600) } }
-        return relativeHours + relativeDays
+        struct Occurrence { let location: Int; let date: Date }
+        var found: [Occurrence] = []
+
+        func addMatches(pattern: String, unit: TimeInterval) {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return }
+            let range = NSRange(startIndex..<endIndex, in: self)
+            for match in regex.matches(in: self, range: range) {
+                guard match.numberOfRanges > 1,
+                      let valueRange = Range(match.range(at: 1), in: self),
+                      let value = Double(self[valueRange]) else { continue }
+                found.append(Occurrence(location: match.range.location, date: now.addingTimeInterval(value * unit)))
+            }
+        }
+
+        addMatches(pattern: #"resets?\s+(?:in\s+)?([0-9]+)\s*h\b"#, unit: 3600)
+        addMatches(pattern: #"resets?\s+(?:in\s+)?([0-9]+)\s*d\b"#, unit: 24 * 3600)
+
+        let absolutePattern = #"resets?\s+([A-Za-z]{3,9})\s+([0-9]{1,2})\s+at\s+([0-9]{1,2})(?::([0-9]{2}))?\s*([ap]m)\s*\(([^)]+)\)"#
+        if let regex = try? NSRegularExpression(pattern: absolutePattern, options: [.caseInsensitive]) {
+            let range = NSRange(startIndex..<endIndex, in: self)
+            for match in regex.matches(in: self, range: range) {
+                guard match.numberOfRanges > 6,
+                      let monthRange = Range(match.range(at: 1), in: self),
+                      let dayRange = Range(match.range(at: 2), in: self),
+                      let hourRange = Range(match.range(at: 3), in: self),
+                      let ampmRange = Range(match.range(at: 5), in: self),
+                      let zoneRange = Range(match.range(at: 6), in: self),
+                      let timeZone = TimeZone(identifier: String(self[zoneRange])),
+                      let day = Int(self[dayRange]),
+                      var hour = Int(self[hourRange])
+                else { continue }
+
+                let minute: Int
+                if match.range(at: 4).location != NSNotFound, let minuteRange = Range(match.range(at: 4), in: self) {
+                    minute = Int(self[minuteRange]) ?? 0
+                } else {
+                    minute = 0
+                }
+
+                let monthFormatter = DateFormatter()
+                monthFormatter.locale = Locale(identifier: "en_US_POSIX")
+                monthFormatter.dateFormat = "MMM"
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = timeZone
+                guard let monthDate = monthFormatter.date(from: String(self[monthRange])) else { continue }
+                let month = calendar.component(.month, from: monthDate)
+
+                let isPM = self[ampmRange].lowercased() == "pm"
+                if isPM, hour != 12 { hour += 12 }
+                if !isPM, hour == 12 { hour = 0 }
+
+                var components = DateComponents()
+                components.year = calendar.component(.year, from: now)
+                components.month = month
+                components.day = day
+                components.hour = hour
+                components.minute = minute
+                components.timeZone = timeZone
+
+                guard var date = calendar.date(from: components) else { continue }
+                // A reset time is always ahead of now. Landing more than a few days in
+                // the past means the year rolled over, e.g. "Jan 2" parsed in late
+                // December with no year in the source text to disambiguate.
+                if date < now.addingTimeInterval(-3 * 24 * 3600) {
+                    components.year = (components.year ?? 0) + 1
+                    if let bumped = calendar.date(from: components) { date = bumped }
+                }
+                found.append(Occurrence(location: match.range.location, date: date))
+            }
+        }
+
+        return found.sorted { $0.location < $1.location }.map(\.date)
     }
 }
 
