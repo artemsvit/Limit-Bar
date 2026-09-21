@@ -701,7 +701,7 @@ struct CodexCLIConnector {
         sleep 0.2
         printf '%s\\n' '{"id":3,"method":"account/read","params":{}}'
         sleep 1
-        } | codex -s read-only -a untrusted app-server
+        } | codex -s read-only -a never app-server
         """
     }
 
