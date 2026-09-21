@@ -65,6 +65,18 @@ final class AppUpdater: ObservableObject {
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+
+        // Verified against SPUUpdater.h: Sparkle's own scheduler only checks once
+        // `updateCheckInterval` has elapsed since the last recorded check, not on
+        // every launch - someone who quit and reopened the app the same day would
+        // not be checked again until the next day. The header explicitly documents
+        // this exact call, immediately after starting the updater and only when
+        // automatic checks are enabled, as how to also check on every launch,
+        // which is what "Look for a new version when Limit Bar starts" in Settings
+        // actually promises.
+        if isConfigured, updaterController.updater.automaticallyChecksForUpdates {
+            updaterController.updater.checkForUpdatesInBackground()
+        }
     }
 
     var canCheckForUpdates: Bool {
@@ -493,7 +505,7 @@ final class SettingsWindowPresenter {
         hostingView.sizingOptions = [.preferredContentSize]
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: hostingView.fittingSize.height),
+            contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: 1),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -503,8 +515,14 @@ final class SettingsWindowPresenter {
         window.isReleasedWhenClosed = false
         window.contentView = hostingView
         window.delegate = windowDelegate
-        window.center()
-        windowDelegate.captureTop(of: window)
+
+        // NSHostingView.fittingSize reads 0 until the view is actually part of a
+        // window - measured directly, forcing layoutIfNeeded() here did not fix it,
+        // SwiftUI resolves it on a later run-loop turn regardless. So this opens at
+        // a 1pt placeholder and lets `sizingOptions` grow it once real layout
+        // resolves; the delegate centers the window the first time that resize
+        // arrives, when the height is finally real, instead of centering the
+        // placeholder up front.
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
@@ -519,10 +537,6 @@ private final class TopAnchoredWindowDelegate: NSObject, NSWindowDelegate {
     private var topEdge: CGFloat?
     private var isAdjusting = false
 
-    func captureTop(of window: NSWindow) {
-        topEdge = window.frame.maxY
-    }
-
     func windowDidMove(_ notification: Notification) {
         guard !isAdjusting, let window = notification.object as? NSWindow else { return }
         topEdge = window.frame.maxY
@@ -531,7 +545,16 @@ private final class TopAnchoredWindowDelegate: NSObject, NSWindowDelegate {
     func windowDidResize(_ notification: Notification) {
         guard !isAdjusting, let window = notification.object as? NSWindow else { return }
 
+        // A nil topEdge means this is the very first resize this delegate has
+        // seen: SwiftUI's hosting view reporting its real content height for the
+        // first time, growing the window from the 1pt placeholder `open()`
+        // created it at. That is the first point the true size is known, so
+        // center it for real now, then remember the result as the anchor for
+        // later resizes (the notifications accordion opening or closing).
         guard let topEdge else {
+            isAdjusting = true
+            window.center()
+            isAdjusting = false
             self.topEdge = window.frame.maxY
             return
         }
