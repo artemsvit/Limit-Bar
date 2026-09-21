@@ -261,8 +261,6 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
     private var segmentLayout: Layout = .bars
     private var hasConnection: Bool { !services.isEmpty }
 
-    /// Widest value we ever draw, so the slot never resizes.
-    private static let percentSlotText = "100"
     private static let dotDiameter: CGFloat = 6
     private static let dotTextGap: CGFloat = 4
     private static let segmentGap: CGFloat = 8
@@ -276,11 +274,18 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
         .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize - 0.5, weight: .semibold)
     }
 
-    private static var percentSlotWidth: CGFloat {
-        ceil(NSAttributedString(
-            string: percentSlotText,
+    private static func percentText(for service: ServiceLimit) -> String {
+        service.current.map { "\($0.remainingPercent)" } ?? "--"
+    }
+
+    /// Each segment is sized to its own value, so a short "0" doesn't drag along
+    /// the dead space a 3-digit "100" would need before the next provider's dot.
+    private static func percentSegmentWidth(for service: ServiceLimit) -> CGFloat {
+        let textWidth = ceil(NSAttributedString(
+            string: percentText(for: service),
             attributes: [.font: percentFont]
         ).size().width)
+        return dotDiameter + dotTextGap + textWidth
     }
 
     /// Width the status item should reserve for the given providers.
@@ -290,10 +295,19 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
         case .bars:
             return CGFloat(count) * barGroupWidth
         case .percent:
-            let segment = dotDiameter + dotTextGap + percentSlotWidth
-            return CGFloat(count) * segment + CGFloat(count - 1) * segmentGap + horizontalInset
+            guard hasConnection(services) else {
+                let placeholderSegment = dotDiameter + dotTextGap + ceil(NSAttributedString(
+                    string: "--",
+                    attributes: [.font: percentFont]
+                ).size().width)
+                return placeholderSegment + horizontalInset
+            }
+            let segments = services.map(percentSegmentWidth)
+            return segments.reduce(0, +) + CGFloat(count - 1) * segmentGap + horizontalInset
         }
     }
+
+    private static func hasConnection(_ services: [ServiceLimit]) -> Bool { !services.isEmpty }
 
     func update(services: [ServiceLimit], layout: Layout) {
         self.services = services
@@ -303,6 +317,17 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
     }
 
     // MARK: - Tooltips
+
+    /// Leading x and width for each provider's segment, laid out left to right
+    /// with each segment sized to its own value's text (see `percentSegmentWidth`).
+    private func percentSegmentFrames() -> [(x: CGFloat, width: CGFloat)] {
+        var x = (bounds.width - Self.width(for: services, layout: .percent) + Self.horizontalInset) / 2
+        return services.map { service in
+            let width = Self.percentSegmentWidth(for: service)
+            defer { x += width + Self.segmentGap }
+            return (x, width)
+        }
+    }
 
     /// A tooltip rect per segment, so hovering one provider explains that provider.
     private func rebuildToolTips() {
@@ -314,17 +339,12 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
         }
 
         toolTip = nil
-        let segment = Self.dotDiameter + Self.dotTextGap + Self.percentSlotWidth
-        var x = (bounds.width - Self.width(for: services, layout: .percent) + Self.horizontalInset) / 2
-
-        for index in services.indices {
+        for frame in percentSegmentFrames() {
             addToolTip(
-                NSRect(x: x - Self.segmentGap / 2, y: 0, width: segment + Self.segmentGap, height: bounds.height),
+                NSRect(x: frame.x - Self.segmentGap / 2, y: 0, width: frame.width + Self.segmentGap, height: bounds.height),
                 owner: self,
                 userData: nil
             )
-            x += segment + Self.segmentGap
-            _ = index
         }
     }
 
@@ -340,12 +360,10 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
     private func service(at point: NSPoint) -> ServiceLimit? {
         guard segmentLayout == .percent, hasConnection else { return nil }
 
-        let segment = Self.dotDiameter + Self.dotTextGap + Self.percentSlotWidth
-        let originX = (bounds.width - Self.width(for: services, layout: .percent) + Self.horizontalInset) / 2
-        let stride = segment + Self.segmentGap
-        let index = Int(floor((point.x - originX + Self.segmentGap / 2) / stride))
-
-        guard services.indices.contains(index) else { return nil }
+        let frames = percentSegmentFrames()
+        guard let index = frames.firstIndex(where: { point.x < $0.x + $0.width + Self.segmentGap / 2 }) else {
+            return nil
+        }
         return services[index]
     }
 
@@ -386,13 +404,9 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
             return
         }
 
-        let slotWidth = Self.percentSlotWidth
-        let segment = Self.dotDiameter + Self.dotTextGap + slotWidth
-        var x = (bounds.width - Self.width(for: services, layout: .percent) + Self.horizontalInset) / 2
-
-        for service in services {
+        for (service, frame) in zip(services, percentSegmentFrames()) {
             let dotRect = NSRect(
-                x: x,
+                x: frame.x,
                 y: (bounds.height - Self.dotDiameter) / 2,
                 width: Self.dotDiameter,
                 height: Self.dotDiameter
@@ -400,20 +414,19 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
             service.id.markerColor.setFill()
             NSBezierPath(ovalIn: dotRect).fill()
 
-            let text = service.current.map { "\($0.remainingPercent)" } ?? "--"
             let attributed = NSAttributedString(
-                string: text,
+                string: Self.percentText(for: service),
                 attributes: [
                     .font: Self.percentFont,
                     .foregroundColor: NSColor.labelColor
                 ]
             )
-            // Right-align inside the fixed slot so digits stay put as values change.
+            // Left-align right after the dot so short values (e.g. "0") sit close to
+            // it, and the segment itself is only as wide as this value needs
+            // (see `percentSegmentWidth`), so the next dot isn't held far away either.
             let textSize = attributed.size()
-            let textX = x + Self.dotDiameter + Self.dotTextGap + (slotWidth - ceil(textSize.width))
+            let textX = frame.x + Self.dotDiameter + Self.dotTextGap
             attributed.draw(at: NSPoint(x: textX, y: (bounds.height - textSize.height) / 2))
-
-            x += segment + Self.segmentGap
         }
     }
 
