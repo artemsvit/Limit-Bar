@@ -3444,6 +3444,7 @@ struct CompactBalanceRow: View {
                         Capsule()
                             .stroke(style.chipBorder, lineWidth: 1)
                     )
+                    .offset(y: -4)
             }
 
             LimitProgressBar(percent: balance?.remainingPercent ?? 0, style: style)
