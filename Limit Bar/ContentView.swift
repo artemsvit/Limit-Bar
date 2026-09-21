@@ -2410,28 +2410,29 @@ struct MenuUsageView: View {
 
             ForEach(store.activeServices.filter(\.isConnected)) { service in
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
+                    HStack(alignment: .firstTextBaseline) {
                         ServiceIcon(service: service.id, size: 22)
                         Text(service.id.shortName)
                             .font(.callout.weight(.medium))
                         Spacer()
+
+                        // Always present, not conditional, so its presence never shifts
+                        // the card's height - it used to appear as a footnote once the
+                        // data turned a minute old, which visibly jumped the layout at
+                        // that exact moment.
+                        if service.isShowingStaleData {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(SettingsPalette.thresholdWarn)
+                        }
+
+                        Text(freshnessText(for: service))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
 
                     CompactBalanceRow(kind: "Current", balance: service.current)
                     CompactBalanceRow(kind: "Weekly", balance: service.weekly)
-
-                    if let footnote = freshnessText(for: service) {
-                        HStack(spacing: 5) {
-                            if service.isShowingStaleData {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 9, weight: .semibold))
-                            }
-
-                            Text(footnote)
-                                .font(.caption2)
-                        }
-                        .foregroundStyle(service.isShowingStaleData ? SettingsPalette.thresholdWarn : .secondary)
-                    }
                 }
                 .padding(10)
                 .settingsCardSurface(cornerRadius: 14, fill: SettingsPalette.surfaceRaised)
@@ -2440,19 +2441,21 @@ struct MenuUsageView: View {
         }
     }
 
-    /// "Updated 4m ago", or a warning when the last background refresh failed and these
-    /// numbers are therefore older than they look.
-    private func freshnessText(for service: ServiceLimit) -> String? {
-        guard let updated = service.lastUpdated else { return nil }
+    /// "Updated 4m ago", or a quieter note that the last background refresh failed and
+    /// these numbers are therefore older than they look - the small warning glyph next
+    /// to it carries the emphasis, so the text itself stays as unobtrusive as the normal
+    /// case rather than turning the whole corner orange.
+    private func freshnessText(for service: ServiceLimit) -> String {
+        guard let updated = service.lastUpdated else { return "" }
 
         let age = Date().timeIntervalSince(updated)
+        let elapsed = Self.ageText(age) ?? "just now"
+
         if service.isShowingStaleData {
-            guard let elapsed = Self.ageText(age) else { return "Couldn't refresh" }
-            return "Couldn't refresh - showing data from \(elapsed) ago"
+            return "Couldn't refresh · \(elapsed) ago"
         }
 
-        guard age >= 60, let elapsed = Self.ageText(age) else { return nil }
-        return "Updated \(elapsed) ago"
+        return age >= 60 ? "Updated \(elapsed) ago" : "Updated just now"
     }
 
     /// DateComponentsFormatter, not RelativeDateTimeFormatter: the latter returns a whole
