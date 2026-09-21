@@ -80,7 +80,8 @@ enum LimitService: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    var shortName: String {
+    /// Pure switch over `self`; usable from background contexts such as tooltip text.
+    nonisolated var shortName: String {
         switch self {
         case .codex: return "Codex"
         case .claude: return "Claude"
@@ -1235,24 +1236,26 @@ struct AntigravityCLIConnector {
 /// Thread-safe accumulator for the pipe readability handlers, which fire on a background queue.
 private final class ProcessOutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
-    private var stdoutData = Data()
-    private var stderrData = Data()
+    // Synchronised by `lock`, not by an actor: the pipe readability handlers fire on a
+    // background queue, so these must not be main actor isolated.
+    nonisolated(unsafe) private var stdoutData = Data()
+    nonisolated(unsafe) private var stderrData = Data()
 
-    func appendStandardOutput(_ data: Data) {
+    nonisolated func appendStandardOutput(_ data: Data) {
         guard !data.isEmpty else { return }
         lock.lock()
         stdoutData.append(data)
         lock.unlock()
     }
 
-    func appendStandardError(_ data: Data) {
+    nonisolated func appendStandardError(_ data: Data) {
         guard !data.isEmpty else { return }
         lock.lock()
         stderrData.append(data)
         lock.unlock()
     }
 
-    func snapshot() -> (stdout: String, stderr: String) {
+    nonisolated func snapshot() -> (stdout: String, stderr: String) {
         lock.lock()
         defer { lock.unlock() }
         return (

@@ -317,8 +317,12 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
     }
 
     func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
-        guard let service = service(at: point) else { return summaryToolTip() ?? "Limit Bar" }
-        return Self.toolTipText(for: service)
+        // AppKit delivers tooltip callbacks on the main thread; assert that rather than
+        // making the helpers nonisolated, which would be a claim that is not true.
+        MainActor.assumeIsolated {
+            guard let service = service(at: point) else { return summaryToolTip() ?? "Limit Bar" }
+            return Self.toolTipText(for: service)
+        }
     }
 
     private func service(at point: NSPoint) -> ServiceLimit? {
@@ -333,7 +337,9 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
         return services[index]
     }
 
-    private static func toolTipText(for service: ServiceLimit) -> String {
+    /// Pure over value types, so it can be used as a function value from `map` without
+    /// dragging main actor isolation along.
+    private nonisolated static func toolTipText(for service: ServiceLimit) -> String {
         let current = service.current.map { "\($0.remainingPercent)%" } ?? "unavailable"
         let weekly = service.weekly.map { "\($0.remainingPercent)%" } ?? "unavailable"
         return "\(service.id.shortName)\nSession: \(current) left\nWeek: \(weekly) left"
