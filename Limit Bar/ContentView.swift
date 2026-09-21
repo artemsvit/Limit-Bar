@@ -198,14 +198,44 @@ final class NotificationPreferencesStore: ObservableObject {
                 return self.preferences.thresholds[index]
             },
             set: { newValue in
-                var updated = self.preferences.thresholds
-                while updated.count <= index {
-                    updated.append(NotificationPreferences.default.thresholds[min(index, NotificationPreferences.default.thresholds.count - 1)])
-                }
-                updated[index] = min(max(newValue, 1), 99)
-                self.preferences.thresholds = updated
+                self.setThreshold(newValue, at: index)
             }
         )
+    }
+
+    /// Thresholds stay strictly ordered: early > warn > critical.
+    ///
+    /// `normalizedThresholds` sorts descending before the values are ever used, so a
+    /// "Critical" set above "Early" would silently become the *first* alert while still
+    /// being labelled critical. Clamping each value between its neighbours keeps the
+    /// labels honest, which matters much more now that they can be dragged past
+    /// each other.
+    func setThreshold(_ value: Int, at index: Int) {
+        var updated = preferences.thresholds
+        let defaults = NotificationPreferences.default.thresholds
+        while updated.count < defaults.count {
+            updated.append(defaults[updated.count])
+        }
+
+        guard updated.indices.contains(index) else { return }
+
+        let upper = index > 0 ? updated[index - 1] - 1 : 99
+        let lower = index < updated.count - 1 ? updated[index + 1] + 1 : 1
+        let safeUpper = min(max(upper, 1), 99)
+        let safeLower = min(max(lower, 1), safeUpper)
+
+        updated[index] = min(max(value, safeLower), safeUpper)
+        preferences.thresholds = updated
+    }
+
+    /// Inclusive range a threshold may take, given its neighbours.
+    func thresholdRange(at index: Int) -> ClosedRange<Int> {
+        let values = preferences.thresholds
+        let upper = index > 0 && values.indices.contains(index - 1) ? values[index - 1] - 1 : 99
+        let lower = index < values.count - 1 && values.indices.contains(index + 1) ? values[index + 1] + 1 : 1
+        let safeUpper = min(max(upper, 1), 99)
+        let safeLower = min(max(lower, 1), safeUpper)
+        return safeLower...safeUpper
     }
 
     func restoreDefaults() {
@@ -2718,7 +2748,9 @@ struct SettingsWindowView: View {
                             .foregroundStyle(.tertiary)
                             .monospacedDigit()
 
-                        ThresholdRuler(values: thresholdValues)
+                        ThresholdSlider(values: thresholdValues) { index, newValue in
+                            notificationSettings.setThreshold(newValue, at: index)
+                        }
 
                         Text("100%")
                             .font(.caption2)
@@ -2726,7 +2758,7 @@ struct SettingsWindowView: View {
                             .monospacedDigit()
                     }
 
-                    Text("Recommended: 50%, 25%, and 10%. Applies to current and weekly balances.")
+                    Text("Drag a handle or type a value. Recommended: 50%, 25%, and 10%. Applies to current and weekly balances.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -3049,59 +3081,127 @@ struct ThresholdTile: View {
     }
 }
 
-/// Shows where the three thresholds sit on a full-to-empty balance, so the
-/// numbers read as a sequence instead of three unrelated fields.
-struct ThresholdRuler: View {
+/// The thresholds as one draggable scale, read right to left as a balance drains from
+/// full to empty.
+///
+/// The coloured bands are the territory of each alert: everything left of the Critical
+/// handle is critical, and so on. That makes a handle's position mean something while it
+/// is being dragged, which a row of static markers never did.
+struct ThresholdSlider: View {
     let values: [Int]
+    /// (index, new value). The store clamps against neighbours.
+    let onChange: (Int, Int) -> Void
 
-    private let markerWidth: CGFloat = 3
+    @State private var draggingIndex: Int?
+
+    private let trackHeight: CGFloat = 8
+    private let handleSize: CGFloat = 16
+    private let severities = ThresholdSeverity.allCases
 
     var body: some View {
         GeometryReader { proxy in
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                SettingsPalette.thresholdCritical.opacity(0.55),
-                                SettingsPalette.thresholdWarn.opacity(0.50),
-                                SettingsPalette.thresholdEarly.opacity(0.45)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(height: 6)
-                    .frame(maxHeight: .infinity, alignment: .center)
+            let usable = max(proxy.size.width - handleSize, 1)
 
-                ForEach(Array(values.enumerated()), id: \.offset) { index, value in
-                    Capsule()
-                        .fill(color(at: index))
-                        .frame(width: markerWidth, height: 14)
-                        .overlay(
-                            Capsule()
-                                .strokeBorder(SettingsPalette.surfaceRaised, lineWidth: 1)
-                        )
-                        .offset(x: offset(for: value, width: proxy.size.width))
-                        .frame(maxHeight: .infinity, alignment: .center)
+            ZStack(alignment: .leading) {
+                track(usable: usable)
+
+                ForEach(orderedHandleIndices, id: \.self) { index in
+                    handle(at: index, usable: usable)
                 }
             }
+            .frame(width: proxy.size.width, height: handleSize, alignment: .leading)
         }
-        .frame(height: 14)
-        .accessibilityHidden(true)
+        .frame(height: handleSize)
     }
 
-    private func color(at index: Int) -> Color {
-        let severities = ThresholdSeverity.allCases
-        guard index < severities.count else { return SettingsPalette.thresholdEarly }
-        return severities[index].color
+    // MARK: - Track
+
+    private func track(usable: CGFloat) -> some View {
+        Capsule()
+            .fill(SettingsPalette.sliderTrack)
+            .frame(width: usable, height: trackHeight)
+            .overlay(alignment: .leading) {
+                ZStack(alignment: .leading) {
+                    // Painted widest first so narrower bands sit on top.
+                    band(from: 0, to: value(at: 0), color: severities[0].color, usable: usable)
+                    band(from: 0, to: value(at: 1), color: severities[1].color, usable: usable)
+                    band(from: 0, to: value(at: 2), color: severities[2].color, usable: usable)
+                }
+            }
+            .clipShape(Capsule())
+            .offset(x: handleSize / 2)
     }
 
-    private func offset(for value: Int, width: CGFloat) -> CGFloat {
-        guard width > markerWidth else { return 0 }
-        let ratio = min(max(Double(value) / 100, 0), 1)
-        let raw = CGFloat(ratio) * width - markerWidth / 2
-        return min(max(raw, 0), width - markerWidth)
+    private func band(from: Int, to: Int, color: Color, usable: CGFloat) -> some View {
+        let width = max(CGFloat(to - from) / 100 * usable, 0)
+        return Rectangle()
+            .fill(color.opacity(0.85))
+            .frame(width: width, height: trackHeight)
+            .offset(x: CGFloat(from) / 100 * usable)
+    }
+
+    // MARK: - Handles
+
+    /// The handle being dragged is drawn last so it stays on top of its neighbours.
+    private var orderedHandleIndices: [Int] {
+        let all = Array(severities.indices)
+        guard let draggingIndex else { return all }
+        return all.filter { $0 != draggingIndex } + [draggingIndex]
+    }
+
+    private func handle(at index: Int, usable: CGFloat) -> some View {
+        let severity = severities[index]
+        let isDragging = draggingIndex == index
+
+        return Circle()
+            .fill(severity.color)
+            .frame(width: handleSize, height: handleSize)
+            .overlay(
+                Circle().strokeBorder(SettingsPalette.surfaceRaised, lineWidth: 2)
+            )
+            .shadow(color: .black.opacity(0.45), radius: isDragging ? 5 : 3, y: 1)
+            .scaleEffect(isDragging ? 1.18 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isDragging)
+            // Generous invisible hit area: the visual handle is smaller than a
+            // comfortable target, especially when two sit close together.
+            .frame(width: handleSize + 14, height: handleSize + 12)
+            .contentShape(Circle())
+            .offset(x: position(for: value(at: index), usable: usable) - (handleSize + 14) / 2 + handleSize / 2)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        draggingIndex = index
+                        onChange(index, percent(at: drag.location.x, usable: usable))
+                    }
+                    .onEnded { _ in
+                        draggingIndex = nil
+                    }
+            )
+            .accessibilityElement()
+            .accessibilityLabel("\(severity.title) threshold")
+            .accessibilityValue("\(value(at: index)) percent")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: onChange(index, value(at: index) + 1)
+                case .decrement: onChange(index, value(at: index) - 1)
+                @unknown default: break
+                }
+            }
+    }
+
+    // MARK: - Geometry
+
+    private func value(at index: Int) -> Int {
+        values.indices.contains(index) ? values[index] : 0
+    }
+
+    private func position(for value: Int, usable: CGFloat) -> CGFloat {
+        CGFloat(min(max(value, 0), 100)) / 100 * usable
+    }
+
+    private func percent(at x: CGFloat, usable: CGFloat) -> Int {
+        let clamped = min(max(x - handleSize / 2, 0), usable)
+        return Int((clamped / usable * 100).rounded())
     }
 }
 
@@ -3510,6 +3610,7 @@ private enum SettingsPalette {
     static let purpleChipBorder = adaptiveColor(light: NSColor(red: 0.49, green: 0.34, blue: 0.72, alpha: 0.16), dark: NSColor(red: 0.80, green: 0.68, blue: 0.94, alpha: 0.18))
     static let purpleText = adaptiveColor(light: NSColor(red: 0.34, green: 0.22, blue: 0.60, alpha: 1), dark: NSColor(red: 0.80, green: 0.68, blue: 0.94, alpha: 1))
 
+    static let sliderTrack = adaptiveColor(light: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 0.12), dark: NSColor.white.withAlphaComponent(0.10))
     static let thresholdEarly = adaptiveColor(light: NSColor(red: 0.05, green: 0.52, blue: 0.50, alpha: 1), dark: NSColor(red: 0.31, green: 0.89, blue: 0.79, alpha: 1))
     static let thresholdWarn = adaptiveColor(light: NSColor(red: 0.74, green: 0.46, blue: 0.09, alpha: 1), dark: NSColor(red: 0.98, green: 0.75, blue: 0.38, alpha: 1))
     static let thresholdCritical = adaptiveColor(light: NSColor(red: 0.72, green: 0.24, blue: 0.27, alpha: 1), dark: NSColor(red: 0.98, green: 0.56, blue: 0.57, alpha: 1))

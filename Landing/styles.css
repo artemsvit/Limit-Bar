@@ -19,6 +19,9 @@
 
   /* Dark chrome — every product-UI preview uses this */
   --panel: #0f1117;
+  /* The blend of --panel's base and the violet glow at the popover's top centre.
+     The tail is painted with this so it reads as part of the panel, not a chip. */
+  --panel-tail: #1e1e34;
   --panel-card: #1b1f27;
   --panel-card-hi: #21252e;
   --panel-line: rgba(255, 255, 255, 0.07);
@@ -439,7 +442,10 @@ h3 {
   box-shadow: var(--shadow-panel), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 
-/* Menu bar popover tail */
+/* Menu bar popover tail.
+   Flat --panel would read as a darker chip here, because the panel itself carries the
+   violet glow at this point. Matching that blend lets the overlapping lower half of the
+   rotated square disappear into the panel instead of stamping a diamond onto it. */
 .mac-window::before {
   content: "";
   position: absolute;
@@ -449,9 +455,7 @@ h3 {
   height: 20px;
   border-radius: 7px;
   transform: translateX(-50%) rotate(45deg);
-  background: #14171f;
-  border-top: 1px solid rgba(255, 255, 255, 0.09);
-  border-left: 1px solid rgba(255, 255, 255, 0.09);
+  background: var(--panel-tail);
 }
 
 .usage-card {
