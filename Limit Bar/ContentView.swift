@@ -22,9 +22,18 @@ struct ServiceLimit: Identifiable, Codable, Equatable {
     var planName: String?
     var lastUpdated: Date?
     var errorMessage: String?
+    /// When a refresh was last attempted, successful or not.
+    var lastAttemptAt: Date?
+    /// Set when a background refresh failed. Kept separate from `.failed` state so the
+    /// last good numbers stay on screen, labelled, instead of the row going blank.
+    var lastAttemptFailed: Bool?
 
     var isConnected: Bool { state == .connected }
     var isConnecting: Bool { state == .connecting }
+
+    var isShowingStaleData: Bool {
+        isConnected && (lastAttemptFailed ?? false)
+    }
 }
 
 struct LimitBalance: Codable, Equatable {
@@ -302,8 +311,9 @@ final class LimitStore: ObservableObject {
     }
 
     private let storageKey = "limit-bar.services.v4"
-    private let refreshInterval: TimeInterval = 180
-    private var refreshTimer: Timer?
+    /// One task per provider, so a slow CLI cannot stack up across triggers.
+    private var inFlight: [LimitService: Task<Void, Never>] = [:]
+    private(set) lazy var refreshCoordinator = RefreshCoordinator(store: self)
 
     init() {
         if let data = UserDefaults.standard.data(forKey: storageKey),
@@ -315,18 +325,7 @@ final class LimitStore: ObservableObject {
             services = LimitService.allCases.map(ServiceLimit.placeholder)
         }
 
-        let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.refreshConnected(showLoading: false, presentErrors: false)
-            }
-        }
-        timer.tolerance = 20
-        RunLoop.main.add(timer, forMode: .common)
-        refreshTimer = timer
-    }
-
-    deinit {
-        refreshTimer?.invalidate()
+        refreshCoordinator.start()
     }
 
     var activeServices: [ServiceLimit] {
@@ -358,18 +357,30 @@ final class LimitStore: ObservableObject {
     }
 
     private func connect(_ service: LimitService, showLoading: Bool, presentErrors: Bool) {
+        // Coalesce: a refresh already running for this provider is as good as a new one.
+        guard inFlight[service] == nil else { return }
+
         if showLoading {
             setState(.connecting, for: service, error: nil)
         }
 
-        Task {
+        let task = Task { [weak self] in
+            defer { self?.inFlight[service] = nil }
+
             do {
                 let snapshot = try await ProviderConnector.fetch(service)
-                apply(snapshot, to: service)
+                self?.apply(snapshot, to: service)
             } catch {
+                guard let self else { return }
+
                 if showLoading {
-                    setState(.failed, for: service, error: error.localizedDescription)
+                    self.setState(.failed, for: service, error: error.localizedDescription)
+                } else {
+                    // A quiet background refresh must not blank a working row, but the
+                    // stale values it leaves behind have to be marked as such.
+                    self.markAttemptFailed(for: service)
                 }
+
                 if presentErrors {
                     if service == .antigravity, AntigravityCLIConnector.isLoginError(error.localizedDescription) {
                         AntigravityAuthPresenter.show(message: error.localizedDescription)
@@ -379,16 +390,44 @@ final class LimitStore: ObservableObject {
                 }
             }
         }
+
+        inFlight[service] = task
     }
 
     func refreshConnected() {
         refreshConnected(showLoading: true, presentErrors: true)
     }
 
+    /// Quiet refresh used by the popover and the background schedule.
+    func refreshInBackground() {
+        refreshConnected(showLoading: false, presentErrors: false)
+    }
+
+    /// Refreshes only when the newest data is older than `maxAge`, so repeatedly opening
+    /// the popover does not relaunch the provider CLIs each time.
+    func refreshIfStale(maxAge: TimeInterval) {
+        let connected = activeServices.filter(\.isConnected)
+        guard !connected.isEmpty else { return }
+
+        let isStale = connected.contains { service in
+            guard let attempted = service.lastAttemptAt ?? service.lastUpdated else { return true }
+            return Date().timeIntervalSince(attempted) >= maxAge
+        }
+
+        guard isStale else { return }
+        refreshInBackground()
+    }
+
     private func refreshConnected(showLoading: Bool, presentErrors: Bool) {
         for service in activeServices where service.isConnected {
             connect(service.id, showLoading: showLoading, presentErrors: presentErrors)
         }
+    }
+
+    private func markAttemptFailed(for service: LimitService) {
+        guard let index = services.firstIndex(where: { $0.id == service }) else { return }
+        services[index].lastAttemptAt = Date()
+        services[index].lastAttemptFailed = true
     }
 
     func resetSetup() {
@@ -416,6 +455,8 @@ final class LimitStore: ObservableObject {
         services[index].accountEmail = snapshot.accountEmail
         services[index].planName = snapshot.planName
         services[index].lastUpdated = Date()
+        services[index].lastAttemptAt = Date()
+        services[index].lastAttemptFailed = false
         services[index].errorMessage = nil
         UsageNotificationCenter.notifyIfNeeded(
             service: service,
@@ -441,6 +482,114 @@ final class LimitStore: ObservableObject {
     private func save() {
         guard let data = try? JSONEncoder().encode(services) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+    }
+}
+
+/// Decides *when* usage is refreshed. `LimitStore` owns the data; this owns the policy.
+///
+/// The old behaviour polled every three minutes from launch to quit, which spent roughly
+/// 10-20 seconds of CLI work per cycle whether or not anyone was looking, and still showed
+/// values up to three minutes old the moment the popover opened. This inverts that: refresh
+/// when the user actually looks, and in the background only when something depends on it.
+@MainActor
+final class RefreshCoordinator {
+    /// Background cadence when usage notifications are on.
+    private let backgroundInterval: TimeInterval = 15 * 60
+    /// Data younger than this is fresh enough to show without relaunching the CLIs.
+    private let popoverMaxAge: TimeInterval = 30
+    /// Balances change at a reset boundary, so look shortly after one.
+    private let postResetDelay: TimeInterval = 30
+
+    private unowned let store: LimitStore
+    private let notificationSettings = NotificationPreferencesStore.shared
+    private var timer: Timer?
+    private var cancellables = Set<AnyCancellable>()
+    private var isAsleep = false
+
+    init(store: LimitStore) {
+        self.store = store
+    }
+
+    func start() {
+        notificationSettings.$preferences
+            .map(\.isEnabled)
+            .removeDuplicates()
+            .sink { [weak self] isEnabled in
+                // @Published emits in willSet, so the stored property is still the old
+                // value here. Schedule from the value the publisher handed us.
+                self?.reschedule(notificationsEnabled: isEnabled)
+            }
+            .store(in: &cancellables)
+
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.publisher(for: NSWorkspace.willSleepNotification)
+            .sink { [weak self] _ in self?.handleSleep() }
+            .store(in: &cancellables)
+        workspace.publisher(for: NSWorkspace.didWakeNotification)
+            .sink { [weak self] _ in self?.handleWake() }
+            .store(in: &cancellables)
+
+        reschedule()
+    }
+
+    /// The user opened the popover: show them something current.
+    func popoverWillShow() {
+        store.refreshIfStale(maxAge: popoverMaxAge)
+    }
+
+    // MARK: - Scheduling
+
+    private func reschedule(notificationsEnabled: Bool? = nil) {
+        let notificationsEnabled = notificationsEnabled ?? notificationSettings.isEnabled
+
+        timer?.invalidate()
+        timer = nil
+
+        // Background polling exists to feed low-balance notifications. With them off it
+        // would burn CPU for data nobody reads until the popover opens, which refreshes
+        // on its own anyway.
+        guard !isAsleep, notificationsEnabled else { return }
+
+        let delay = nextDelay()
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.tick()
+            }
+        }
+        timer.tolerance = min(60, delay * 0.1)
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func nextDelay() -> TimeInterval {
+        let standard = backgroundInterval
+
+        // If a window resets before the next ordinary tick, wait for the reset instead:
+        // that is the moment the numbers actually move.
+        guard let nextReset = store.nextReset else { return standard }
+
+        let untilReset = nextReset.timeIntervalSinceNow + postResetDelay
+        guard untilReset > 0, untilReset < standard else { return standard }
+        return max(untilReset, 60)
+    }
+
+    private func tick() {
+        store.refreshInBackground()
+        reschedule()
+    }
+
+    // MARK: - Sleep
+
+    private func handleSleep() {
+        isAsleep = true
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func handleWake() {
+        isAsleep = false
+        store.refreshIfStale(maxAge: popoverMaxAge)
+        reschedule()
     }
 }
 
@@ -474,12 +623,22 @@ enum ProviderConnector {
 }
 
 struct CodexCLIConnector {
+    /// Run from a directory the app owns rather than inheriting whatever the app was
+    /// launched with, so the CLI resolves its state from a predictable place.
+    private static func probeDirectory() -> URL? {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/LimitBar/CodexProbe", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return FileManager.default.fileExists(atPath: directory.path) ? directory : nil
+    }
+
     static func fetch() async throws -> ProviderSnapshot {
         let result = try await ProcessRunner.run(
             executable: "/bin/zsh",
             arguments: ["-lc", rpcScript()],
             input: nil,
-            timeout: 12
+            timeout: 12,
+            currentDirectory: probeDirectory()
         )
 
         guard result.status == 0 || !result.stdout.isEmpty else {
@@ -1032,6 +1191,36 @@ struct AntigravityCLIConnector {
     }
 }
 
+/// Thread-safe accumulator for the pipe readability handlers, which fire on a background queue.
+private final class ProcessOutputBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stdoutData = Data()
+    private var stderrData = Data()
+
+    func appendStandardOutput(_ data: Data) {
+        guard !data.isEmpty else { return }
+        lock.lock()
+        stdoutData.append(data)
+        lock.unlock()
+    }
+
+    func appendStandardError(_ data: Data) {
+        guard !data.isEmpty else { return }
+        lock.lock()
+        stderrData.append(data)
+        lock.unlock()
+    }
+
+    func snapshot() -> (stdout: String, stderr: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (
+            String(data: stdoutData, encoding: .utf8) ?? "",
+            String(data: stderrData, encoding: .utf8) ?? ""
+        )
+    }
+}
+
 struct ProcessRunner {
     struct Result {
         let stdout: String
@@ -1053,6 +1242,10 @@ struct ProcessRunner {
             let stderrPipe = Pipe()
             let stdinPipe = Pipe()
             let finishGate = ProcessFinishGate()
+            // Drained continuously: a child that outruns the 64KB pipe buffer would
+            // otherwise block on write and never reach its termination handler. The
+            // Claude probe runs a TUI through a pty, so it can be genuinely chatty.
+            let output = ProcessOutputBuffer()
 
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
@@ -1073,13 +1266,35 @@ struct ProcessRunner {
                 }
             }
 
+            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                } else {
+                    output.appendStandardOutput(data)
+                }
+            }
+
+            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                } else {
+                    output.appendStandardError(data)
+                }
+            }
+
             process.terminationHandler = { proc in
-                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                output.appendStandardOutput(stdoutPipe.fileHandleForReading.availableData)
+                output.appendStandardError(stderrPipe.fileHandleForReading.availableData)
+
+                let snapshot = output.snapshot()
                 finish {
                     Result(
-                        stdout: String(data: stdoutData, encoding: .utf8) ?? "",
-                        stderr: String(data: stderrData, encoding: .utf8) ?? "",
+                        stdout: snapshot.stdout,
+                        stderr: snapshot.stderr,
                         status: proc.terminationStatus
                     )
                 }
@@ -1098,11 +1313,73 @@ struct ProcessRunner {
 
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                 if finishGate.claim() {
-                    if process.isRunning { process.terminate() }
+                    stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                    stderrPipe.fileHandleForReading.readabilityHandler = nil
+
+                    if process.isRunning {
+                        let pid = process.processIdentifier
+                        // Capture the tree before signalling anything: killing the shell
+                        // reparents its children to launchd, and the relationship is lost.
+                        // Measured: `zsh -lc '... | script ... claude'` leaves `script` and
+                        // `claude` running if only the shell is terminated.
+                        let descendants = descendantProcessIDs(of: pid)
+
+                        process.terminate()
+                        for descendant in descendants {
+                            kill(descendant, SIGTERM)
+                        }
+
+                        // SIGTERM is a request. Escalate so a wedged CLI cannot linger.
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                            if process.isRunning {
+                                kill(pid, SIGKILL)
+                            }
+                            for descendant in descendants {
+                                kill(descendant, SIGKILL)
+                            }
+                        }
+                    }
+
                     continuation.resume(throwing: ConnectorError.message("Timed out while reading usage data."))
                 }
             }
         }
+    }
+
+    /// Every PID descended from `root`, depth first.
+    ///
+    /// Must be called while `root` is still alive, otherwise its children have already been
+    /// reparented to launchd and cannot be attributed back to us. Returns PIDs only - we
+    /// never signal a process group, since our children inherit the app's own group and
+    /// signalling it would hit Limit Bar itself.
+    private static func descendantProcessIDs(of root: pid_t) -> [pid_t] {
+        var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var size = 0
+
+        guard sysctl(&name, UInt32(name.count), nil, &size, nil, 0) == 0, size > 0 else { return [] }
+
+        let capacity = size / MemoryLayout<kinfo_proc>.stride + 16
+        var entries = [kinfo_proc](repeating: kinfo_proc(), count: capacity)
+        size = capacity * MemoryLayout<kinfo_proc>.stride
+
+        guard sysctl(&name, UInt32(name.count), &entries, &size, nil, 0) == 0 else { return [] }
+
+        var childrenByParent: [pid_t: [pid_t]] = [:]
+        for entry in entries.prefix(size / MemoryLayout<kinfo_proc>.stride) {
+            let pid = entry.kp_proc.p_pid
+            guard pid > 1 else { continue }
+            childrenByParent[entry.kp_eproc.e_ppid, default: []].append(pid)
+        }
+
+        var descendants: [pid_t] = []
+        var queue = childrenByParent[root] ?? []
+        while let pid = queue.popLast() {
+            guard pid > 1, !descendants.contains(pid) else { continue }
+            descendants.append(pid)
+            queue.append(contentsOf: childrenByParent[pid] ?? [])
+        }
+
+        return descendants
     }
 
     private static func mergedEnvironment(overrides: [String: String] = [:]) -> [String: String] {
@@ -2018,12 +2295,54 @@ struct MenuUsageView: View {
 
                     CompactBalanceRow(kind: "Current", balance: service.current)
                     CompactBalanceRow(kind: "Weekly", balance: service.weekly)
+
+                    if let footnote = freshnessText(for: service) {
+                        HStack(spacing: 5) {
+                            if service.isShowingStaleData {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 9, weight: .semibold))
+                            }
+
+                            Text(footnote)
+                                .font(.caption2)
+                        }
+                        .foregroundStyle(service.isShowingStaleData ? SettingsPalette.thresholdWarn : .secondary)
+                    }
                 }
                 .padding(10)
                 .settingsCardSurface(cornerRadius: 14, fill: SettingsPalette.surfaceRaised)
             }
 
         }
+    }
+
+    /// "Updated 4m ago", or a warning when the last background refresh failed and these
+    /// numbers are therefore older than they look.
+    private func freshnessText(for service: ServiceLimit) -> String? {
+        guard let updated = service.lastUpdated else { return nil }
+
+        let age = Date().timeIntervalSince(updated)
+        if service.isShowingStaleData {
+            guard let elapsed = Self.ageText(age) else { return "Couldn't refresh" }
+            return "Couldn't refresh - showing data from \(elapsed) ago"
+        }
+
+        guard age >= 60, let elapsed = Self.ageText(age) else { return nil }
+        return "Updated \(elapsed) ago"
+    }
+
+    /// DateComponentsFormatter, not RelativeDateTimeFormatter: the latter returns a whole
+    /// phrase ("4 minutes ago") that reads wrong once embedded in a sentence.
+    private static func ageText(_ interval: TimeInterval) -> String? {
+        guard interval >= 60 else { return nil }
+
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.maximumUnitCount = 1
+        formatter.allowedUnits = interval >= 86_400 ? [.day] : (interval >= 3_600 ? [.hour] : [.minute])
+
+        guard let text = formatter.string(from: interval), !text.isEmpty else { return nil }
+        return text
     }
 }
 

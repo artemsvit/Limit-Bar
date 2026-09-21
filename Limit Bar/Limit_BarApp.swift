@@ -170,6 +170,8 @@ final class StatusBarController: NSObject {
             popover.performClose(sender)
         } else {
             refreshIcon()
+            // Opening the menu is the one moment freshness actually matters.
+            store.refreshCoordinator.popoverWillShow()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
