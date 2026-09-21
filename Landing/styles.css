@@ -377,6 +377,19 @@ h3 {
   font-weight: 600;
 }
 
+/* "Free" reads as a claim, not decoration, so it gets the accent rather than being
+   another grey item in the meta row. */
+.meta-badge {
+  padding: 3px 9px;
+  border: 1px solid rgba(91, 82, 224, 0.28);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(91, 82, 224, 0.16), rgba(111, 92, 224, 0.08));
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 .meta-dot {
   width: 5px;
   height: 5px;
