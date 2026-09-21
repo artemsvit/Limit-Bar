@@ -2410,25 +2410,32 @@ struct MenuUsageView: View {
 
             ForEach(store.activeServices.filter(\.isConnected)) { service in
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .firstTextBaseline) {
+                    HStack(spacing: 8) {
                         ServiceIcon(service: service.id, size: 22)
                         Text(service.id.shortName)
                             .font(.callout.weight(.medium))
-                        Spacer()
+
+                        Spacer(minLength: 8)
 
                         // Always present, not conditional, so its presence never shifts
                         // the card's height - it used to appear as a footnote once the
                         // data turned a minute old, which visibly jumped the layout at
-                        // that exact moment.
-                        if service.isShowingStaleData {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(SettingsPalette.thresholdWarn)
-                        }
+                        // that exact moment. `.center` (the HStack default) keeps the
+                        // icon vertically centered against the title; `.firstTextBaseline`
+                        // was tried here first and pulled the icon toward the text's
+                        // baseline instead, since a plain image has none of its own.
+                        HStack(spacing: 5) {
+                            if service.isShowingStaleData {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(SettingsPalette.thresholdWarn)
+                            }
 
-                        Text(freshnessText(for: service))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            Text(freshnessText(for: service))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                     }
 
                     CompactBalanceRow(kind: "Current", balance: service.current)
