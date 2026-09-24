@@ -372,7 +372,18 @@ final class UsageStatusIconView: NSView, NSViewToolTipOwner {
     private nonisolated static func toolTipText(for service: ServiceLimit) -> String {
         let current = service.current.map { "\($0.remainingPercent)%" } ?? "unavailable"
         let weekly = service.weekly.map { "\($0.remainingPercent)%" } ?? "unavailable"
-        return "\(service.id.shortName)\nSession: \(current) left\nWeek: \(weekly) left"
+        var text = "\(service.id.shortName)\nSession: \(current) left\nWeek: \(weekly) left"
+        if let updated = service.lastUpdated {
+            let age = Int(Date().timeIntervalSince(updated))
+            if age < 60 {
+                text += "\nUpdated just now"
+            } else if age < 3600 {
+                text += "\nUpdated \(max(1, age / 60))m ago"
+            } else {
+                text += "\nUpdated \(age / 3600)h ago"
+            }
+        }
+        return text
     }
 
     private func summaryToolTip() -> String? {

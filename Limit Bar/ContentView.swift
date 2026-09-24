@@ -163,6 +163,57 @@ final class MenuBarDisplayPreferencesStore: ObservableObject {
     }
 }
 
+enum RefreshInterval: Int, CaseIterable, Identifiable, Codable {
+    case oneMinute = 60
+    case twoMinutes = 120
+    case fiveMinutes = 300
+    case fifteenMinutes = 900
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .oneMinute: return "1 minute"
+        case .twoMinutes: return "2 minutes (Recommended)"
+        case .fiveMinutes: return "5 minutes"
+        case .fifteenMinutes: return "15 minutes"
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .oneMinute: return "1 min"
+        case .twoMinutes: return "2 min"
+        case .fiveMinutes: return "5 min"
+        case .fifteenMinutes: return "15 min"
+        }
+    }
+}
+
+@MainActor
+final class RefreshPreferencesStore: ObservableObject {
+    static let shared = RefreshPreferencesStore()
+
+    @Published var interval: RefreshInterval {
+        didSet { save() }
+    }
+
+    private let storageKey = "limit-bar.refresh-interval.v1"
+
+    private init() {
+        if let raw = UserDefaults.standard.object(forKey: storageKey) as? Int,
+           let decoded = RefreshInterval(rawValue: raw) {
+            interval = decoded
+        } else {
+            interval = .twoMinutes
+        }
+    }
+
+    private func save() {
+        UserDefaults.standard.set(interval.rawValue, forKey: storageKey)
+    }
+}
+
 @MainActor
 final class NotificationPreferencesStore: ObservableObject {
     static let shared = NotificationPreferencesStore()
@@ -349,13 +400,24 @@ enum UsageNotificationCenter {
 @MainActor
 final class LimitStore: ObservableObject {
     @Published var services: [ServiceLimit] {
-        didSet { save() }
+        didSet {
+            save()
+            refreshCoordinator.reschedule()
+        }
     }
 
     private let storageKey = "limit-bar.services.v4"
     /// One task per provider, so a slow CLI cannot stack up across triggers.
-    private var inFlight: [LimitService: Task<Void, Never>] = [:]
+    private var inFlight: [LimitService: Task<Void, Never>] = [:] {
+        didSet {
+            objectWillChange.send()
+        }
+    }
     private(set) lazy var refreshCoordinator = RefreshCoordinator(store: self)
+
+    var isRefreshing: Bool {
+        !inFlight.isEmpty
+    }
 
     init() {
         if let data = UserDefaults.standard.data(forKey: storageKey),
@@ -529,21 +591,17 @@ final class LimitStore: ObservableObject {
 
 /// Decides *when* usage is refreshed. `LimitStore` owns the data; this owns the policy.
 ///
-/// The old behaviour polled every three minutes from launch to quit, which spent roughly
-/// 10-20 seconds of CLI work per cycle whether or not anyone was looking, and still showed
-/// values up to three minutes old the moment the popover opened. This inverts that: refresh
-/// when the user actually looks, and in the background only when something depends on it.
+/// Refreshes automatically in the background so the menu bar always shows fresh data,
+/// upon waking from sleep, shortly after startup, and immediately when the user opens the popover.
 @MainActor
 final class RefreshCoordinator {
-    /// Background cadence when usage notifications are on.
-    private let backgroundInterval: TimeInterval = 15 * 60
     /// Data younger than this is fresh enough to show without relaunching the CLIs.
     private let popoverMaxAge: TimeInterval = 30
     /// Balances change at a reset boundary, so look shortly after one.
-    private let postResetDelay: TimeInterval = 30
+    private let postResetDelay: TimeInterval = 15
 
     private unowned let store: LimitStore
-    private let notificationSettings = NotificationPreferencesStore.shared
+    private let refreshPreferences = RefreshPreferencesStore.shared
     private var timer: Timer?
     private var cancellables = Set<AnyCancellable>()
     private var isAsleep = false
@@ -553,13 +611,10 @@ final class RefreshCoordinator {
     }
 
     func start() {
-        notificationSettings.$preferences
-            .map(\.isEnabled)
+        refreshPreferences.$interval
             .removeDuplicates()
-            .sink { [weak self] isEnabled in
-                // @Published emits in willSet, so the stored property is still the old
-                // value here. Schedule from the value the publisher handed us.
-                self?.reschedule(notificationsEnabled: isEnabled)
+            .sink { [weak self] _ in
+                self?.reschedule()
             }
             .store(in: &cancellables)
 
@@ -571,6 +626,12 @@ final class RefreshCoordinator {
             .sink { [weak self] _ in self?.handleWake() }
             .store(in: &cancellables)
 
+        // Initial refresh shortly after launch so the menu bar displays up-to-date numbers
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, !self.isAsleep else { return }
+            self.store.refreshIfStale(maxAge: self.popoverMaxAge)
+        }
+
         reschedule()
     }
 
@@ -581,16 +642,13 @@ final class RefreshCoordinator {
 
     // MARK: - Scheduling
 
-    private func reschedule(notificationsEnabled: Bool? = nil) {
-        let notificationsEnabled = notificationsEnabled ?? notificationSettings.isEnabled
-
+    func reschedule() {
         timer?.invalidate()
         timer = nil
 
-        // Background polling exists to feed low-balance notifications. With them off it
-        // would burn CPU for data nobody reads until the popover opens, which refreshes
-        // on its own anyway.
-        guard !isAsleep, notificationsEnabled else { return }
+        // Background polling feeds the menu bar status item and usage notifications.
+        // It runs whenever the Mac is awake and at least one provider is connected.
+        guard !isAsleep, store.connectedCount > 0 else { return }
 
         let delay = nextDelay()
         let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
@@ -598,13 +656,13 @@ final class RefreshCoordinator {
                 self?.tick()
             }
         }
-        timer.tolerance = min(60, delay * 0.1)
+        timer.tolerance = min(15, delay * 0.1)
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
     }
 
     private func nextDelay() -> TimeInterval {
-        let standard = backgroundInterval
+        let standard = TimeInterval(refreshPreferences.interval.rawValue)
 
         // If a window resets before the next ordinary tick, wait for the reset instead:
         // that is the moment the numbers actually move.
@@ -612,7 +670,7 @@ final class RefreshCoordinator {
 
         let untilReset = nextReset.timeIntervalSinceNow + postResetDelay
         guard untilReset > 0, untilReset < standard else { return standard }
-        return max(untilReset, 60)
+        return max(untilReset, 10)
     }
 
     private func tick() {
@@ -783,27 +841,35 @@ struct ClaudeCLIConnector {
     static func fetch() async throws -> ProviderSnapshot {
         try await ensureLoggedIn()
 
+        // Fast path: headless `/usage` takes ~3s and avoids spinning up a heavy pty/TUI session.
+        do {
+            let result = try await ProcessRunner.run(
+                executable: "/usr/bin/env",
+                arguments: ["claude", "--print", "/usage"],
+                input: nil,
+                timeout: 10
+            )
+
+            let output = [result.stdout, result.stderr].joined(separator: "\n")
+            if output.localizedCaseInsensitiveContains("not logged in") || output.localizedCaseInsensitiveContains("please run /login") {
+                throw ConnectorError.message("Claude Code is not logged in. Open Claude Code and run `/login`, then retry.")
+            }
+
+            if let snapshot = try? parseUsage(output) {
+                return snapshot
+            }
+        } catch let error as ConnectorError {
+            throw error
+        } catch {
+            // Fall through to status-line probe fallback
+        }
+
+        // Fallback: if headless print did not expose subscription limits, probe status line
         if let statusLineSnapshot = try await fetchStatusLineUsage() {
             return statusLineSnapshot
         }
 
-        let result = try await ProcessRunner.run(
-            executable: "/usr/bin/env",
-            arguments: ["claude", "--print", "/usage"],
-            input: nil,
-            timeout: 14
-        )
-
-        let output = [result.stdout, result.stderr].joined(separator: "\n")
-        guard result.status == 0 || !output.isEmpty else {
-            throw ConnectorError.message("Claude Code did not return usage data. Make sure Claude Code is installed and signed in.")
-        }
-
-        if output.localizedCaseInsensitiveContains("not logged in") || output.localizedCaseInsensitiveContains("please run /login") {
-            throw ConnectorError.message("Claude Code is not logged in. Open Claude Code and run `/login`, then retry.")
-        }
-
-        return try parseUsage(output)
+        throw ConnectorError.message("Claude Code did not expose 5-hour or weekly usage limits in a recognized format.")
     }
 
     private static func fetchStatusLineUsage() async throws -> ProviderSnapshot? {
@@ -816,7 +882,7 @@ struct ClaudeCLIConnector {
         let captureURL = tempDirectory.appendingPathComponent("statusline.json")
         let settingsURL = tempDirectory.appendingPathComponent("settings.json")
         let probeDirectory = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/CodexBar/ClaudeProbe", isDirectory: true)
+            .appendingPathComponent("Library/Application Support/LimitBar/ClaudeProbe", isDirectory: true)
         try fileManager.createDirectory(at: probeDirectory, withIntermediateDirectories: true)
 
         let captureCommand = "python3 -c 'import pathlib,sys; pathlib.Path(\"\(captureURL.path)\").write_text(sys.stdin.read())'"
@@ -942,7 +1008,7 @@ struct ClaudeCLIConnector {
                 weekly: LimitBalance(title: "Weekly usage limit", remainingPercent: normalizeClaudePercent(percents[1], clean), resetsAt: dates.dropFirst().first ?? Date().addingTimeInterval(7 * 24 * 60 * 60)),
                 credits: nil,
                 accountEmail: nil,
-                planName: nil
+                planName: "Claude"
             )
         }
 
@@ -1272,6 +1338,13 @@ struct ProcessRunner {
         let status: Int32
     }
 
+    static func defaultProbeDirectory() -> URL {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/LimitBar/Probe", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
     static func run(
         executable: String,
         arguments: [String],
@@ -1280,7 +1353,8 @@ struct ProcessRunner {
         environmentOverrides: [String: String] = [:],
         currentDirectory: URL? = nil
     ) async throws -> Result {
-        try await withCheckedThrowingContinuation { continuation in
+        let workingDirectory = currentDirectory ?? defaultProbeDirectory()
+        return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
@@ -1295,9 +1369,10 @@ struct ProcessRunner {
             process.arguments = arguments
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
-            if input != nil { process.standardInput = stdinPipe }
-            process.environment = mergedEnvironment(overrides: environmentOverrides)
-            process.currentDirectoryURL = currentDirectory
+            var overrides = environmentOverrides
+            overrides["PWD"] = workingDirectory.path
+            process.environment = mergedEnvironment(overrides: overrides)
+            process.currentDirectoryURL = workingDirectory
 
             @Sendable
             func finish(_ action: () throws -> Result) {
@@ -2399,6 +2474,17 @@ struct MenuUsageView: View {
                     .font(.system(size: 16, weight: .semibold))
                 Spacer()
 
+                if store.isRefreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 26, height: 26)
+                        .help("Refreshing limits...")
+                } else {
+                    MenuHeaderIconButton(systemName: "arrow.clockwise", helpText: "Refresh limits") {
+                        store.refreshConnected()
+                    }
+                }
+
                 MenuHeaderIconButton(systemName: "gearshape", helpText: "Open settings") {
                     SettingsWindowPresenter.shared.open(store: store)
                 }
@@ -2586,6 +2672,7 @@ struct SettingsWindowView: View {
     @EnvironmentObject private var store: LimitStore
     @StateObject private var notificationSettings = NotificationPreferencesStore.shared
     @StateObject private var menuBarDisplaySettings = MenuBarDisplayPreferencesStore.shared
+    @StateObject private var refreshPreferences = RefreshPreferencesStore.shared
     @StateObject private var appUpdater = AppUpdater.shared
     @State private var startsAtLogin = LaunchAtLoginController.isEnabled
     @State private var notificationDetailsExpanded = false
@@ -2708,10 +2795,42 @@ struct SettingsWindowView: View {
                 .fill(SettingsPalette.divider)
                 .frame(height: 1)
 
+            refreshCadenceRow
+
+            Rectangle()
+                .fill(SettingsPalette.divider)
+                .frame(height: 1)
+
             automaticUpdatesRow
         }
         .padding(12)
         .settingsCardSurface(cornerRadius: 15)
+    }
+
+    private var refreshCadenceRow: some View {
+        HStack(spacing: 10) {
+            SettingsAccentIcon(systemName: "arrow.clockwise", tint: .accent)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Refresh interval")
+                    .font(.headline)
+                Text("How often Limit Bar refreshes limits in the background.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Picker("", selection: $refreshPreferences.interval) {
+                ForEach(RefreshInterval.allCases) { item in
+                    Text(item.shortName).tag(item)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 95)
+        }
     }
 
     private var automaticUpdatesRow: some View {
@@ -3415,6 +3534,7 @@ enum AntigravityAuthPresenter {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = ["-e", script]
+        process.currentDirectoryURL = ProcessRunner.defaultProbeDirectory()
         try? process.run()
     }
 }
