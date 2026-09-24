@@ -419,6 +419,10 @@ final class LimitStore: ObservableObject {
         !inFlight.isEmpty
     }
 
+    func isRefreshing(for service: LimitService) -> Bool {
+        inFlight[service] != nil
+    }
+
     init() {
         if let data = UserDefaults.standard.data(forKey: storageKey),
            let decoded = try? JSONDecoder().decode([ServiceLimit].self, from: data) {
@@ -499,7 +503,7 @@ final class LimitStore: ObservableObject {
     }
 
     func refreshConnected() {
-        refreshConnected(showLoading: true, presentErrors: true)
+        refreshConnected(showLoading: false, presentErrors: true)
     }
 
     /// Quiet refresh used by the popover and the background schedule.
@@ -2524,8 +2528,8 @@ struct MenuUsageView: View {
                         }
                     }
 
-                    CompactBalanceRow(kind: "Current", balance: service.current)
-                    CompactBalanceRow(kind: "Weekly", balance: service.weekly)
+                    CompactBalanceRow(kind: "Current", balance: service.current, isRefreshing: store.isRefreshing(for: service.id))
+                    CompactBalanceRow(kind: "Weekly", balance: service.weekly, isRefreshing: store.isRefreshing(for: service.id))
                 }
                 .padding(10)
                 .settingsCardSurface(cornerRadius: 14, fill: SettingsPalette.surfaceRaised)
@@ -3539,9 +3543,26 @@ enum AntigravityAuthPresenter {
     }
 }
 
+struct SkeletonCapsule: View {
+    var width: CGFloat? = nil
+    var height: CGFloat = 10
+    @State private var isPulsing = false
+
+    var body: some View {
+        Capsule()
+            .fill(SettingsPalette.trackTop.opacity(isPulsing ? 0.35 : 0.75))
+            .frame(width: width, height: height)
+            .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true), value: isPulsing)
+            .onAppear {
+                isPulsing = true
+            }
+    }
+}
+
 struct CompactBalanceRow: View {
     let kind: String
     let balance: LimitBalance?
+    var isRefreshing: Bool = false
 
     private var style: UsageAccentStyle {
         kind.localizedCaseInsensitiveContains("weekly") ? .weekly : .current
@@ -3550,9 +3571,13 @@ struct CompactBalanceRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text(balance.map { "\($0.remainingPercent)%" } ?? "--")
-                    .font(.title3.weight(.semibold))
-                    .monospacedDigit()
+                if isRefreshing {
+                    SkeletonCapsule(width: 44, height: 16)
+                } else {
+                    Text(balance.map { "\($0.remainingPercent)%" } ?? "--")
+                        .font(.title3.weight(.semibold))
+                        .monospacedDigit()
+                }
                 Spacer()
                 Text(kind)
                     .font(.caption.weight(.semibold))
@@ -3567,13 +3592,21 @@ struct CompactBalanceRow: View {
                     .offset(y: -4)
             }
 
-            LimitProgressBar(percent: balance?.remainingPercent ?? 0, style: style)
-                .frame(height: 10)
+            if isRefreshing {
+                SkeletonCapsule(height: 10)
+            } else {
+                LimitProgressBar(percent: balance?.remainingPercent ?? 0, style: style)
+                    .frame(height: 10)
+            }
 
-            Text(compactResetText)
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            if isRefreshing {
+                SkeletonCapsule(width: 80, height: 12)
+            } else {
+                Text(compactResetText)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
         }
     }
 
