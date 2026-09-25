@@ -757,9 +757,12 @@ final class RefreshCoordinator {
     /// Throttled rather than debounced: during a long session the writes never pause,
     /// and a debounce would hold the refresh back until the session ended.
     private func activityDetected(for service: LimitService) {
+        // A provider whose last refresh failed is left to the regular schedule and the
+        // refresh button: retrying it on every burst of session writes would only
+        // relaunch a CLI that is already known to be failing.
         guard !isAsleep, pendingActivityRefresh[service] == nil,
               let limit = store.activeServices.first(where: { $0.id == service }),
-              limit.isConnected else { return }
+              limit.isConnected, !(limit.lastAttemptFailed ?? false) else { return }
 
         let sinceLast = (limit.lastAttemptAt ?? limit.lastUpdated).map { Date().timeIntervalSince($0) } ?? .infinity
         let delay = max(activeRefreshInterval - sinceLast, activitySettleDelay)
@@ -1422,13 +1425,22 @@ struct AntigravityCLIConnector {
         )
 
         let output = [result.stdout, result.stderr].joined(separator: "\n")
+        // Only report a login problem here. Opening Terminal is left to
+        // `AntigravityAuthPresenter`, which asks first and only after a refresh the
+        // user started: this also runs on the background schedule, and an interactive
+        // `agy` session writes to the folders `ProviderActivityMonitor` watches, so
+        // opening it from here launched a new Terminal window on every retry.
         guard result.status == 0 || !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            await openAntigravityLogin(binary: binary)
             throw ConnectorError.message(loginMessage)
         }
 
+        // Real quota data wins over keyword matching: the login check looks for loose
+        // phrases such as "401" or "sign in", which a normal response can contain too.
+        if result.status == 0, let snapshot = try? parseUsage(output) {
+            return snapshot
+        }
+
         if isUnauthenticated(output) {
-            await openAntigravityLogin(binary: binary)
             throw ConnectorError.message(loginMessage)
         }
 
@@ -1542,23 +1554,6 @@ struct AntigravityCLIConnector {
 
     private static var loginMessage: String {
         "Antigravity is not logged in for CLI access. Run `agy` in Terminal, press Enter to open Google OAuth, paste the browser code back into the CLI, then retry Connect."
-    }
-
-    private static func openAntigravityLogin(binary: String) async {
-        _ = try? await ProcessRunner.run(
-            executable: "/usr/bin/osascript",
-            arguments: [
-                "-e",
-                """
-                tell application "Terminal"
-                    activate
-                    do script "\(binary.shellQuoted)"
-                end tell
-                """
-            ],
-            input: nil,
-            timeout: 4
-        )
     }
 
     private static func latestAuthenticatedEmail() -> String? {
