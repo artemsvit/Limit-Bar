@@ -10,6 +10,7 @@ import Combine
 import Foundation
 import AppKit
 import ServiceManagement
+import CoreServices
 import UserNotifications
 
 struct ServiceLimit: Identifiable, Codable, Equatable {
@@ -40,7 +41,17 @@ struct LimitBalance: Codable, Equatable {
     var title: String
     var remainingPercent: Int
     var resetsAt: Date
+    /// The CLI gave no reset time, so `resetsAt` is only a guess of when the window
+    /// would end. Claude prints none for a session that has not started yet.
+    var isResetEstimated: Bool? = nil
 
+    var hasKnownReset: Bool { !(isResetEstimated ?? false) }
+
+    /// An untouched window has not started its clock; anything else without a reset
+    /// time is simply not reported.
+    static func unknownResetText(for balance: LimitBalance) -> String {
+        balance.remainingPercent >= 100 ? "Idle · starts on next use" : "Reset time unavailable"
+    }
     var usedPercent: Int { max(100 - remainingPercent, 0) }
 }
 
@@ -301,7 +312,12 @@ final class NotificationPreferencesStore: ObservableObject {
 }
 
 enum UsageNotificationCenter {
-    private static let sentThresholdsKey = "limit-bar.sent-threshold-notifications.v1"
+    private static let legacySentThresholdsKey = "limit-bar.sent-threshold-notifications.v1"
+    private static let notifiedLevelsKey = "limit-bar.notified-threshold-levels.v2"
+    /// Remaining usage has to climb this far back above an alerted threshold before
+    /// that threshold can alert again, so a value wobbling 49/51 around a 50% threshold
+    /// does not alert on every refresh.
+    private static let rearmMargin = 5
 
     static func requestAuthorizationIfNeeded() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
@@ -311,7 +327,7 @@ enum UsageNotificationCenter {
         requestAuthorizationIfNeeded()
 
         let content = UNMutableNotificationContent()
-        content.title = "Codex current is low"
+        content.title = "Codex session limit is running low"
         content.body = "24% remaining, resets in 4 hours."
         content.sound = .default
 
@@ -323,77 +339,129 @@ enum UsageNotificationCenter {
         UNUserNotificationCenter.current().add(request)
     }
 
+    /// v1 remembered alerts by (threshold, reset timestamp). Claude's weekly reset was
+    /// often a guessed "now + 7 days" that moved on every refresh, so each refresh
+    /// looked like a brand new window and alerted again. Seed the new per-limit state
+    /// from what is on screen right now, silently, so upgrading does not re-alert either.
+    @MainActor
+    static func migrateLegacyState(services: [ServiceLimit], preferences: NotificationPreferences) {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: legacySentThresholdsKey) != nil else { return }
+        defer { defaults.removeObject(forKey: legacySentThresholdsKey) }
+        guard defaults.object(forKey: notifiedLevelsKey) == nil else { return }
+
+        var levels: [String: Int] = [:]
+        for service in services where service.isConnected {
+            for (kind, balance) in [("Current", service.current), ("Weekly", service.weekly)] {
+                guard let balance,
+                      let level = crossedLevel(remaining: balance.remainingPercent, thresholds: preferences.normalizedThresholds)
+                else { continue }
+                levels[levelKey(service: service.id, kind: kind)] = level
+            }
+        }
+        defaults.set(levels, forKey: notifiedLevelsKey)
+    }
+
     @MainActor
     static func notifyIfNeeded(
         service: LimitService,
-        previous: ServiceLimit?,
         current: ServiceLimit,
         preferences: NotificationPreferences
     ) {
         guard preferences.isEnabled else { return }
         requestAuthorizationIfNeeded()
 
-        evaluate(kind: "Current", service: service, previous: previous?.current, current: current.current, thresholds: preferences.normalizedThresholds)
-        evaluate(kind: "Weekly", service: service, previous: previous?.weekly, current: current.weekly, thresholds: preferences.normalizedThresholds)
+        evaluate(kind: "Current", service: service, current: current.current, thresholds: preferences.normalizedThresholds)
+        evaluate(kind: "Weekly", service: service, current: current.weekly, thresholds: preferences.normalizedThresholds)
     }
 
+    /// One alert per threshold per window, tracked by value alone.
+    ///
+    /// Each limit remembers the most severe threshold it has already alerted for. It
+    /// alerts again only on crossing a *more* severe threshold, and forgets only once
+    /// remaining usage has genuinely come back up (the window reset), which does not
+    /// depend on reset timestamps that some CLIs only report approximately.
     @MainActor
     private static func evaluate(
         kind: String,
         service: LimitService,
-        previous: LimitBalance?,
         current: LimitBalance?,
         thresholds: [Int]
     ) {
         guard let current else { return }
 
-        for threshold in thresholds where current.remainingPercent <= threshold {
-            let token = notificationToken(service: service, kind: kind, threshold: threshold, resetAt: current.resetsAt)
-            if sentThresholdTokens().contains(token) {
-                continue
-            }
+        let key = levelKey(service: service, kind: kind)
+        let remaining = current.remainingPercent
+        let level = crossedLevel(remaining: remaining, thresholds: thresholds)
+        var levels = notifiedLevels()
 
-            let crossedThreshold = previous == nil || previous!.resetsAt != current.resetsAt || previous!.remainingPercent > threshold
-            guard crossedThreshold else { continue }
-
-            deliverNotification(service: service, kind: kind, threshold: threshold, current: current)
-            markSent(token: token)
+        if let notified = levels[key], remaining >= notified + rearmMargin {
+            levels[key] = level
         }
+
+        if let level, levels[key].map({ level < $0 }) ?? true {
+            deliverNotification(service: service, kind: kind, current: current, level: level, severity: severity(of: level, in: thresholds))
+            levels[key] = level
+        }
+
+        UserDefaults.standard.set(levels, forKey: notifiedLevelsKey)
+    }
+
+    /// Thresholds arrive sorted from least to most severe (early, warn, critical).
+    private static func severity(of level: Int, in thresholds: [Int]) -> ThresholdSeverity {
+        let index = thresholds.firstIndex(of: level) ?? 0
+        return ThresholdSeverity.allCases[min(index, ThresholdSeverity.allCases.count - 1)]
+    }
+
+    /// The most severe threshold the value is at or below, if any.
+    private static func crossedLevel(remaining: Int, thresholds: [Int]) -> Int? {
+        thresholds.filter { remaining <= $0 }.min()
     }
 
     @MainActor
-    private static func deliverNotification(service: LimitService, kind: String, threshold: Int, current: LimitBalance) {
+    private static func deliverNotification(service: LimitService, kind: String, current: LimitBalance, level: Int, severity: ThresholdSeverity) {
         let content = UNMutableNotificationContent()
-        content.title = "\(service.shortName) \(kind.lowercased()) is low"
-        content.body = "\(current.remainingPercent)% remaining, \(resetText(for: current.resetsAt))"
-        content.sound = .default
+        content.title = title(service: service, kind: kind, level: level, severity: severity)
+        content.body = body(for: current)
+        // The first heads-up is informational; only the later ones make a sound.
+        content.sound = severity == .early ? nil : .default
 
+        // Stable per limit, so a newer alert replaces the older one in Notification
+        // Center instead of stacking up beside it.
         let request = UNNotificationRequest(
-            identifier: notificationToken(service: service, kind: kind, threshold: threshold, resetAt: current.resetsAt),
+            identifier: "limit-bar.usage.\(levelKey(service: service, kind: kind))",
             content: content,
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
     }
 
-    private static func resetText(for date: Date) -> String {
+    /// "Low" undersells 10% left and oversells 50%, so the wording follows the
+    /// threshold the user set rather than one fixed phrase.
+    private static func title(service: LimitService, kind: String, level: Int, severity: ThresholdSeverity) -> String {
+        let limit = "\(service.shortName) \(kind == "Current" ? "session" : "weekly") limit"
+        switch severity {
+        case .early: return "\(limit) is below \(level)%"
+        case .warn: return "\(limit) is running low"
+        case .critical: return "\(limit) is almost used up"
+        }
+    }
+
+    private static func body(for balance: LimitBalance) -> String {
+        let remaining = "\(balance.remainingPercent)% remaining"
+        guard balance.hasKnownReset else { return "\(remaining)." }
+
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .full
-        return "resets \(formatter.localizedString(for: date, relativeTo: Date()))."
+        return "\(remaining), resets \(formatter.localizedString(for: balance.resetsAt, relativeTo: Date()))."
     }
 
-    private static func notificationToken(service: LimitService, kind: String, threshold: Int, resetAt: Date) -> String {
-        "\(service.rawValue)|\(kind)|\(threshold)|\(Int(resetAt.timeIntervalSince1970))"
+    private static func levelKey(service: LimitService, kind: String) -> String {
+        "\(service.rawValue)|\(kind)"
     }
 
-    private static func sentThresholdTokens() -> Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: sentThresholdsKey) ?? [])
-    }
-
-    private static func markSent(token: String) {
-        var tokens = sentThresholdTokens()
-        tokens.insert(token)
-        UserDefaults.standard.set(Array(tokens), forKey: sentThresholdsKey)
+    private static func notifiedLevels() -> [String: Int] {
+        UserDefaults.standard.dictionary(forKey: notifiedLevelsKey) as? [String: Int] ?? [:]
     }
 }
 
@@ -413,6 +481,9 @@ final class LimitStore: ObservableObject {
             objectWillChange.send()
         }
     }
+    /// Providers whose refresh the user asked for. Only these show a loading skeleton;
+    /// scheduled refreshes swap the new numbers in without one.
+    @Published private(set) var manualRefreshes: Set<LimitService> = []
     private(set) lazy var refreshCoordinator = RefreshCoordinator(store: self)
 
     var isRefreshing: Bool {
@@ -421,6 +492,10 @@ final class LimitStore: ObservableObject {
 
     func isRefreshing(for service: LimitService) -> Bool {
         inFlight[service] != nil
+    }
+
+    func isManuallyRefreshing(_ service: LimitService) -> Bool {
+        manualRefreshes.contains(service)
     }
 
     init() {
@@ -433,6 +508,10 @@ final class LimitStore: ObservableObject {
             services = LimitService.allCases.map(ServiceLimit.placeholder)
         }
 
+        UsageNotificationCenter.migrateLegacyState(
+            services: services,
+            preferences: NotificationPreferencesStore.shared.preferences
+        )
         refreshCoordinator.start()
     }
 
@@ -454,8 +533,10 @@ final class LimitStore: ObservableObject {
     var nextReset: Date? {
         activeServices
             .filter(\.isConnected)
-            .flatMap { [$0.current?.resetsAt, $0.weekly?.resetsAt] }
+            .flatMap { [$0.current, $0.weekly] }
             .compactMap { $0 }
+            .filter(\.hasKnownReset)
+            .map(\.resetsAt)
             .filter { $0 > Date() }
             .min()
     }
@@ -473,7 +554,10 @@ final class LimitStore: ObservableObject {
         }
 
         let task = Task { [weak self] in
-            defer { self?.inFlight[service] = nil }
+            defer {
+                self?.inFlight[service] = nil
+                self?.manualRefreshes.remove(service)
+            }
 
             do {
                 let snapshot = try await ProviderConnector.fetch(service)
@@ -502,8 +586,19 @@ final class LimitStore: ObservableObject {
         inFlight[service] = task
     }
 
+    /// The refresh button. If a scheduled refresh for a provider is already running,
+    /// that one is joined rather than restarted, and shows the skeleton too.
     func refreshConnected() {
+        for service in activeServices where service.isConnected {
+            manualRefreshes.insert(service.id)
+        }
         refreshConnected(showLoading: false, presentErrors: true)
+    }
+
+    /// Quiet refresh of one provider, used when its CLI shows signs of activity.
+    func refreshInBackground(_ service: LimitService) {
+        guard activeServices.contains(where: { $0.id == service && $0.isConnected }) else { return }
+        connect(service, showLoading: false, presentErrors: false)
     }
 
     /// Quiet refresh used by the popover and the background schedule.
@@ -555,7 +650,6 @@ final class LimitStore: ObservableObject {
 
     private func apply(_ snapshot: ProviderSnapshot, to service: LimitService) {
         guard let index = services.firstIndex(where: { $0.id == service }) else { return }
-        let previous = services[index]
         services[index].state = .connected
         services[index].current = snapshot.current
         services[index].weekly = snapshot.weekly
@@ -568,7 +662,6 @@ final class LimitStore: ObservableObject {
         services[index].errorMessage = nil
         UsageNotificationCenter.notifyIfNeeded(
             service: service,
-            previous: previous,
             current: services[index],
             preferences: NotificationPreferencesStore.shared.preferences
         )
@@ -597,18 +690,31 @@ final class LimitStore: ObservableObject {
 ///
 /// Refreshes automatically in the background so the menu bar always shows fresh data,
 /// upon waking from sleep, shortly after startup, and immediately when the user opens the popover.
+///
+/// Limits only move while a tool is being used, so on top of the fixed interval each
+/// provider is also re-read soon after its CLI writes session activity to disk. That
+/// keeps the menu bar current while you work, without polling faster when idle.
 @MainActor
 final class RefreshCoordinator {
     /// Data younger than this is fresh enough to show without relaunching the CLIs.
     private let popoverMaxAge: TimeInterval = 30
     /// Balances change at a reset boundary, so look shortly after one.
     private let postResetDelay: TimeInterval = 15
+    /// While a provider is in use, re-read its limits at most this often.
+    private let activeRefreshInterval: TimeInterval = 45
+    /// Let a burst of session writes settle, and the provider's server account for the
+    /// request, before reading.
+    private let activitySettleDelay: TimeInterval = 8
 
     private unowned let store: LimitStore
     private let refreshPreferences = RefreshPreferencesStore.shared
     private var timer: Timer?
     private var cancellables = Set<AnyCancellable>()
     private var isAsleep = false
+    private var pendingActivityRefresh: [LimitService: DispatchWorkItem] = [:]
+    private lazy var activityMonitor = ProviderActivityMonitor { [weak self] service in
+        self?.activityDetected(for: service)
+    }
 
     init(store: LimitStore) {
         self.store = store
@@ -630,6 +736,8 @@ final class RefreshCoordinator {
             .sink { [weak self] _ in self?.handleWake() }
             .store(in: &cancellables)
 
+        activityMonitor.start()
+
         // Initial refresh shortly after launch so the menu bar displays up-to-date numbers
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, !self.isAsleep else { return }
@@ -642,6 +750,28 @@ final class RefreshCoordinator {
     /// The user opened the popover: show them something current.
     func popoverWillShow() {
         store.refreshIfStale(maxAge: popoverMaxAge)
+    }
+
+    // MARK: - Activity
+
+    /// Throttled rather than debounced: during a long session the writes never pause,
+    /// and a debounce would hold the refresh back until the session ended.
+    private func activityDetected(for service: LimitService) {
+        guard !isAsleep, pendingActivityRefresh[service] == nil,
+              let limit = store.activeServices.first(where: { $0.id == service }),
+              limit.isConnected else { return }
+
+        let sinceLast = (limit.lastAttemptAt ?? limit.lastUpdated).map { Date().timeIntervalSince($0) } ?? .infinity
+        let delay = max(activeRefreshInterval - sinceLast, activitySettleDelay)
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingActivityRefresh[service] = nil
+            guard !self.isAsleep else { return }
+            self.store.refreshInBackground(service)
+        }
+        pendingActivityRefresh[service] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     // MARK: - Scheduling
@@ -688,12 +818,106 @@ final class RefreshCoordinator {
         isAsleep = true
         timer?.invalidate()
         timer = nil
+        pendingActivityRefresh.values.forEach { $0.cancel() }
+        pendingActivityRefresh.removeAll()
     }
 
     private func handleWake() {
         isAsleep = false
         store.refreshIfStale(maxAge: popoverMaxAge)
         reschedule()
+    }
+}
+
+/// Reports which provider's CLI is being used, from writes to the folders each one
+/// keeps its session history in.
+///
+/// Only files a real session writes are counted. Limit Bar's own probes write to
+/// some of these folders too (`claude --print` records a session for its working
+/// directory, `agy` logs every run), and counting those would make every refresh
+/// trigger the next one.
+final class ProviderActivityMonitor {
+    private struct Source {
+        let service: LimitService
+        let root: String
+        let counts: (String) -> Bool
+    }
+
+    private let onActivity: (LimitService) -> Void
+    private let sources: [Source]
+    private var stream: FSEventStreamRef?
+
+    init(onActivity: @escaping (LimitService) -> Void) {
+        self.onActivity = onActivity
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let antigravitySession: (String) -> Bool = { path in
+            ["/brain/", "/conversations/", "/implicit/"].contains { path.contains($0) }
+        }
+        sources = [
+            Source(service: .claude, root: home + "/.claude/projects/") { path in
+                // Probe sessions live under project folders named after their working
+                // directory, e.g. "-Users-me-Library-Application-Support-LimitBar-Probe".
+                path.hasSuffix(".jsonl") && !path.contains("-Library-Application-Support-")
+            },
+            Source(service: .codex, root: home + "/.codex/sessions/") { $0.hasSuffix(".jsonl") },
+            Source(service: .antigravity, root: home + "/.gemini/antigravity/", counts: antigravitySession),
+            Source(service: .antigravity, root: home + "/.gemini/antigravity-cli/", counts: antigravitySession)
+        ]
+    }
+
+    deinit {
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+    }
+
+    func start() {
+        guard stream == nil else { return }
+
+        let roots = sources.map(\.root).filter { FileManager.default.fileExists(atPath: $0) }
+        guard !roots.isEmpty else { return }
+
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+        let callback: FSEventStreamCallback = { _, info, count, paths, _, _ in
+            guard let info else { return }
+            let monitor = Unmanaged<ProviderActivityMonitor>.fromOpaque(info).takeUnretainedValue()
+            let changed = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
+            // The stream is scheduled on the main queue.
+            MainActor.assumeIsolated {
+                monitor.handle(Array(changed.prefix(count)))
+            }
+        }
+
+        guard let stream = FSEventStreamCreate(
+            nil,
+            callback,
+            &context,
+            roots as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            2,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents)
+        ) else { return }
+
+        FSEventStreamSetDispatchQueue(stream, .main)
+        FSEventStreamStart(stream)
+        self.stream = stream
+    }
+
+    private func handle(_ paths: [String]) {
+        var active = Set<LimitService>()
+        for path in paths {
+            if let source = sources.first(where: { path.hasPrefix($0.root) }), source.counts(path) {
+                active.insert(source.service)
+            }
+        }
+        active.forEach(onActivity)
     }
 }
 
@@ -843,29 +1067,19 @@ struct CodexCLIConnector {
 
 struct ClaudeCLIConnector {
     static func fetch() async throws -> ProviderSnapshot {
+        // Fast path: headless `/usage` takes ~3s and avoids spinning up a heavy pty/TUI session.
+        // Limits in its output already prove the CLI is signed in to a subscription,
+        // so `claude auth status` - a second Node process on every refresh - only runs
+        // when they are missing, to explain why.
+        let printed = await fetchPrintUsage()
+        if let snapshot = printed.snapshot {
+            return snapshot
+        }
+
         try await ensureLoggedIn()
 
-        // Fast path: headless `/usage` takes ~3s and avoids spinning up a heavy pty/TUI session.
-        do {
-            let result = try await ProcessRunner.run(
-                executable: "/usr/bin/env",
-                arguments: ["claude", "--print", "/usage"],
-                input: nil,
-                timeout: 10
-            )
-
-            let output = [result.stdout, result.stderr].joined(separator: "\n")
-            if output.localizedCaseInsensitiveContains("not logged in") || output.localizedCaseInsensitiveContains("please run /login") {
-                throw ConnectorError.message("Claude Code is not logged in. Open Claude Code and run `/login`, then retry.")
-            }
-
-            if let snapshot = try? parseUsage(output) {
-                return snapshot
-            }
-        } catch let error as ConnectorError {
-            throw error
-        } catch {
-            // Fall through to status-line probe fallback
+        if printed.reportedLoggedOut {
+            throw ConnectorError.message("Claude Code is not logged in. Open Claude Code and run `/login`, then retry.")
         }
 
         // Fallback: if headless print did not expose subscription limits, probe status line
@@ -874,6 +1088,23 @@ struct ClaudeCLIConnector {
         }
 
         throw ConnectorError.message("Claude Code did not expose 5-hour or weekly usage limits in a recognized format.")
+    }
+
+    private static func fetchPrintUsage() async -> (snapshot: ProviderSnapshot?, reportedLoggedOut: Bool) {
+        guard let result = try? await ProcessRunner.run(
+            executable: "/usr/bin/env",
+            arguments: ["claude", "--print", "/usage"],
+            input: nil,
+            timeout: 10
+        ) else {
+            return (nil, false)
+        }
+
+        let output = [result.stdout, result.stderr].joined(separator: "\n")
+        if output.localizedCaseInsensitiveContains("not logged in") || output.localizedCaseInsensitiveContains("please run /login") {
+            return (nil, true)
+        }
+        return (try? parseUsage(output), false)
     }
 
     private static func fetchStatusLineUsage() async throws -> ProviderSnapshot? {
@@ -990,17 +1221,23 @@ struct ClaudeCLIConnector {
         guard let dictionary,
               let used = number(dictionary["used_percentage"] ?? dictionary["usedPercent"] ?? dictionary["utilization"]) else { return nil }
 
-        let resetDate = date(dictionary["resets_at"] ?? dictionary["resetsAt"]) ?? fallbackReset
+        let reportedReset = date(dictionary["resets_at"] ?? dictionary["resetsAt"])
         let usedPercentage = used <= 1 ? used * 100 : used
         return LimitBalance(
             title: title,
             remainingPercent: clampPercent(100 - Int(usedPercentage.rounded())),
-            resetsAt: resetDate
+            resetsAt: reportedReset ?? fallbackReset,
+            isResetEstimated: reportedReset == nil
         )
     }
 
     private static func parseUsage(_ output: String) throws -> ProviderSnapshot {
         let clean = output.strippingANSI()
+
+        if let snapshot = parseUsageLines(clean) {
+            return snapshot
+        }
+
         let percents = clean.matches(pattern: #"([0-9]{1,3})\s*%\s*(?:remaining|left|available|used)?"#)
             .compactMap { Int($0) }
             .map(clampPercent)
@@ -1021,6 +1258,56 @@ struct ClaudeCLIConnector {
         }
 
         throw ConnectorError.message("Claude Code did not expose 5-hour or weekly usage limits in a recognized format.")
+    }
+
+    /// Reads each limit from its own line, e.g.
+    /// "Current session: 2% used · resets Sep 25 at 3:49pm (Europe/Kiev)".
+    ///
+    /// Pairing every percentage in the output with every reset date in order went
+    /// wrong in two ways, verified against claude 2.1.281: an idle session prints no
+    /// reset at all, so the session borrowed the weekly reset and the weekly limit
+    /// fell back to a guessed "now + 7 days" that moved on every refresh; and the
+    /// usage breakdown printed below the limits adds more, unrelated percentages.
+    private static func parseUsageLines(_ text: String) -> ProviderSnapshot? {
+        var current: LimitBalance?
+        var weekly: LimitBalance?
+        var modelWeekly: LimitBalance?
+
+        for line in text.split(whereSeparator: \.isNewline).map(String.init) {
+            let lower = line.lowercased()
+            guard let match = line.matches(pattern: #"([0-9]{1,3})\s*%\s*(?:used|left|remaining)"#).first,
+                  let value = Int(match) else { continue }
+
+            let percent = clampPercent(value)
+            let remaining = lower.contains("% used") ? clampPercent(100 - percent) : percent
+            let reset = line.extractResetDates().first
+
+            if lower.contains("session") || lower.contains("5-hour") || lower.contains("5 hour") {
+                current = current ?? LimitBalance(
+                    title: "5 hour usage limit",
+                    remainingPercent: remaining,
+                    resetsAt: reset ?? Date().addingTimeInterval(5 * 60 * 60),
+                    isResetEstimated: reset == nil
+                )
+            } else if lower.contains("week") {
+                let balance = LimitBalance(
+                    title: "Weekly usage limit",
+                    remainingPercent: remaining,
+                    resetsAt: reset ?? Date().addingTimeInterval(7 * 24 * 60 * 60),
+                    isResetEstimated: reset == nil
+                )
+                // "Current week (all models)" is the account-wide cap; per-model weekly
+                // buckets are only a fallback when it is missing.
+                if lower.contains("sonnet") || lower.contains("opus") {
+                    modelWeekly = modelWeekly ?? balance
+                } else {
+                    weekly = weekly ?? balance
+                }
+            }
+        }
+
+        guard current != nil || weekly != nil || modelWeekly != nil else { return nil }
+        return ProviderSnapshot(current: current, weekly: weekly ?? modelWeekly, credits: nil, accountEmail: nil, planName: "Claude")
     }
 
     private static func normalizeClaudePercent(_ value: Int, _ text: String) -> Int {
@@ -2298,6 +2585,7 @@ struct BalanceMetric: View {
 
     private var resetText: String {
         guard let balance else { return "Waiting for balance" }
+        guard balance.hasKnownReset else { return LimitBalance.unknownResetText(for: balance) }
         return "Resets \(balance.resetsAt.formatted(date: kind == "Weekly" ? .abbreviated : .omitted, time: .shortened))"
     }
 
@@ -2528,8 +2816,8 @@ struct MenuUsageView: View {
                         }
                     }
 
-                    CompactBalanceRow(kind: "Current", balance: service.current, isRefreshing: store.isRefreshing(for: service.id))
-                    CompactBalanceRow(kind: "Weekly", balance: service.weekly, isRefreshing: store.isRefreshing(for: service.id))
+                    CompactBalanceRow(kind: "Current", balance: service.current, isRefreshing: store.isManuallyRefreshing(service.id))
+                    CompactBalanceRow(kind: "Weekly", balance: service.weekly, isRefreshing: store.isManuallyRefreshing(service.id))
                 }
                 .padding(10)
                 .settingsCardSurface(cornerRadius: 14, fill: SettingsPalette.surfaceRaised)
@@ -3543,25 +3831,58 @@ enum AntigravityAuthPresenter {
     }
 }
 
-struct SkeletonCapsule: View {
-    var width: CGFloat? = nil
-    var height: CGFloat = 10
-    @State private var isPulsing = false
+/// Stand-in for `LimitProgressBar` while a manual refresh runs: the same empty track
+/// at the same size, with a highlight sweeping across it, so only the bar itself
+/// signals loading and nothing around it moves.
+struct LimitBarSkeleton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var phase: CGFloat = 0
 
     var body: some View {
-        Capsule()
-            .fill(SettingsPalette.trackTop.opacity(isPulsing ? 0.35 : 0.75))
-            .frame(width: width, height: height)
-            .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true), value: isPulsing)
-            .onAppear {
-                isPulsing = true
+        GeometryReader { proxy in
+            let sweepWidth = proxy.size.width * 0.35
+
+            Capsule()
+                .fill(
+                    LinearGradient(
+                        colors: [SettingsPalette.trackTop, SettingsPalette.trackBottom],
+                        startPoint: .trailing,
+                        endPoint: .leading
+                    )
+                )
+                .overlay(alignment: .leading) {
+                    LinearGradient(
+                        colors: [.clear, Color.primary.opacity(reduceMotion ? 0 : 0.14), .clear],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: sweepWidth)
+                    .offset(x: -sweepWidth + phase * (proxy.size.width + sweepWidth))
+                }
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(SettingsPalette.trackBorder, lineWidth: 1)
+                )
+                .opacity(reduceMotion && phase > 0 ? 0.6 : 1)
+        }
+        .accessibilityLabel("Refreshing")
+        .onAppear {
+            let animation = reduceMotion
+                ? Animation.easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+                : Animation.linear(duration: 1.1).repeatForever(autoreverses: false)
+            withAnimation(animation) {
+                phase = 1
             }
+        }
     }
 }
 
 struct CompactBalanceRow: View {
     let kind: String
     let balance: LimitBalance?
+    /// Swaps just the bar for a skeleton. The percentage and reset text keep showing
+    /// the last known values, so the row never changes size.
     var isRefreshing: Bool = false
 
     private var style: UsageAccentStyle {
@@ -3571,13 +3892,10 @@ struct CompactBalanceRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
-                if isRefreshing {
-                    SkeletonCapsule(width: 44, height: 16)
-                } else {
-                    Text(balance.map { "\($0.remainingPercent)%" } ?? "--")
-                        .font(.title3.weight(.semibold))
-                        .monospacedDigit()
-                }
+                Text(balance.map { "\($0.remainingPercent)%" } ?? "--")
+                    .font(.title3.weight(.semibold))
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(balance?.remainingPercent ?? 0)))
                 Spacer()
                 Text(kind)
                     .font(.caption.weight(.semibold))
@@ -3592,26 +3910,29 @@ struct CompactBalanceRow: View {
                     .offset(y: -4)
             }
 
-            if isRefreshing {
-                SkeletonCapsule(height: 10)
-            } else {
-                LimitProgressBar(percent: balance?.remainingPercent ?? 0, style: style)
-                    .frame(height: 10)
+            ZStack {
+                if isRefreshing {
+                    LimitBarSkeleton()
+                        .transition(.opacity)
+                } else {
+                    LimitProgressBar(percent: balance?.remainingPercent ?? 0, style: style)
+                        .transition(.opacity)
+                }
             }
+            .frame(height: 10)
 
-            if isRefreshing {
-                SkeletonCapsule(width: 80, height: 12)
-            } else {
-                Text(compactResetText)
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
+            Text(compactResetText)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
         }
+        .animation(.easeInOut(duration: 0.25), value: isRefreshing)
+        .animation(.snappy, value: balance?.remainingPercent)
     }
 
     private var compactResetText: String {
         guard let balance else { return "Waiting for balance" }
+        guard balance.hasKnownReset else { return LimitBalance.unknownResetText(for: balance) }
 
         let remaining = balance.resetsAt.timeIntervalSinceNow
         guard remaining > 0 else { return "Resets now" }
