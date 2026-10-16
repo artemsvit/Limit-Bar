@@ -34,7 +34,7 @@
   <link rel="shortcut icon" href="/favicon.ico" />
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/site.webmanifest" />
-  <link rel="stylesheet" href="styles.css?v=20260921-2">
+  <link rel="stylesheet" href="styles.css?v=20261016-history">
   <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -248,7 +248,7 @@
     <section class="section-intro" id="features">
       <p class="eyebrow">Why it feels better</p>
       <h2>Built for developers who want a faster AI usage tracker.</h2>
-      <p class="section-copy">Instead of another dashboard, Limit Bar gives you a calm, glanceable menu bar view for Codex, Claude Code, and Antigravity usage on macOS.</p>
+      <p class="section-copy">Keep current limits a glance away, with local history when you want to look closer. Built for Codex, Claude Code, and Antigravity on macOS.</p>
     </section>
 
     <section class="feature-layout">
@@ -269,6 +269,60 @@
         <h3>Quiet when you do not need it.</h3>
         <p>It lives in the menu bar, refreshes in the background, and stays out of your way until timing actually matters.</p>
       </article>
+    </section>
+
+    <section class="statistics-section" id="statistics" aria-labelledby="statistics-title">
+      <div class="statistics-intro">
+        <div>
+          <p class="eyebrow">Local usage history</p>
+          <h2 id="statistics-title">See where your usage goes.</h2>
+        </div>
+        <p class="section-copy">A quick glance tells you what is left. Your history shows how you got there. Explore session and weekly balances, inspect exact readings, and keep up to 30 days of history on your Mac.</p>
+      </div>
+
+      <div class="statistics-demo" data-statistics-demo>
+        <div class="statistics-window-bar" aria-hidden="true"><span></span><span></span><span></span><small>Limit Bar</small></div>
+        <div class="statistics-window-content">
+          <div class="statistics-heading">
+            <div><h3>Usage history</h3><p>Your available usage, over time.</p></div>
+            <button class="statistics-export" type="button" data-statistics-export><i data-lucide="share" aria-hidden="true"></i>Export CSV</button>
+          </div>
+          <div class="statistics-providers" role="group" aria-label="Preview provider">
+            <button type="button" class="statistics-provider" data-statistics-provider="codex" aria-pressed="true"><img src="assets/codex.png" alt="" width="28" height="28"><span><strong>Codex</strong><small data-statistics-provider-value="codex">33% · session</small></span><span class="statistics-provider-check" aria-hidden="true">✓</span></button>
+            <button type="button" class="statistics-provider" data-statistics-provider="claude" aria-pressed="false"><img src="assets/claude-code.png" alt="" width="28" height="28"><span><strong>Claude</strong><small data-statistics-provider-value="claude">91% · session</small></span><span class="statistics-provider-check" aria-hidden="true">✓</span></button>
+            <button type="button" class="statistics-provider" data-statistics-provider="antigravity" aria-pressed="false"><img src="assets/antigravity.png" alt="" width="28" height="28"><span><strong>Antigravity</strong><small data-statistics-provider-value="antigravity">64% · session</small></span><span class="statistics-provider-check" aria-hidden="true">✓</span></button>
+          </div>
+          <div class="statistics-controls"><span class="statistics-period">24 hours <span>· 8 readings</span></span><div class="statistics-windows" role="group" aria-label="Preview usage window"><button type="button" data-statistics-window="session" aria-pressed="true">Session</button><button type="button" data-statistics-window="weekly" aria-pressed="false">Weekly</button></div></div>
+          <div class="statistics-metrics">
+            <div><span>Latest remaining</span><strong data-statistics-latest>33%</strong><small>Last recorded balance</small></div>
+            <div><span>Lowest remaining</span><strong data-statistics-lowest>33%</strong><small>In this recorded span</small></div>
+            <div><span>Observed drop</span><strong data-statistics-drop>63 <em>pp</em></strong><small>Percentage points</small></div>
+          </div>
+          <div class="statistics-chart-card">
+            <div class="statistics-chart-heading"><strong data-statistics-chart-title>Session remaining</strong><span>Recorded span</span></div>
+            <div class="statistics-chart" aria-hidden="true">
+              <div class="statistics-axis"><span>100%</span><span>50%</span><span>0%</span></div>
+              <svg viewBox="0 0 700 200" preserveAspectRatio="none">
+                <defs><linearGradient id="statistics-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="currentColor" stop-opacity=".18"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+                <g class="statistics-grid"><path d="M10 10H690 M10 100H690 M10 190H690"/></g>
+                <path class="statistics-area" data-statistics-area d="M10 17 L107 28 L204 50 L301 50 L398 73 L495 96 L592 109 L690 131 L690 190 L10 190Z"/>
+                <path class="statistics-line" data-statistics-line pathLength="1" d="M10 17 L107 28 L204 50 L301 50 L398 73 L495 96 L592 109 L690 131"/>
+                <line class="statistics-guide" data-statistics-guide x1="690" x2="690" y1="10" y2="190"/>
+                <circle class="statistics-point" data-statistics-point cx="690" cy="131" r="4"/>
+              </svg>
+            </div>
+            <div class="statistics-times" aria-hidden="true"><span>9:00 AM</span><span>9:45 AM</span><span>10:45 AM</span></div>
+            <div class="statistics-inspection" role="status" aria-live="polite" aria-atomic="true"><span><small data-statistics-reading-label>Latest reading · 10:45 AM</small><strong data-statistics-selected>33% session <span>·</span> 68% weekly</strong></span><span class="statistics-local"><i data-lucide="hard-drive" aria-hidden="true"></i>Only on your Mac</span></div>
+          </div>
+          <div class="statistics-readings" aria-label="Inspect sample readings">
+            <div class="statistics-reading-head" aria-hidden="true"><span>Recorded</span><span>Session</span><span>Weekly</span><span>Change</span></div>
+            <button type="button" data-statistics-reading="7" aria-pressed="true"><span>10:45 AM</span><span data-statistics-row-session="7">33%</span><span data-statistics-row-weekly="7">68%</span><span data-statistics-row-change="7">−12 pp</span></button>
+            <button type="button" data-statistics-reading="6" aria-pressed="false"><span>10:30 AM</span><span data-statistics-row-session="6">45%</span><span data-statistics-row-weekly="6">70%</span><span data-statistics-row-change="6">−7 pp</span></button>
+            <button type="button" data-statistics-reading="5" aria-pressed="false"><span>10:15 AM</span><span data-statistics-row-session="5">52%</span><span data-statistics-row-weekly="5">72%</span><span data-statistics-row-change="5">−13 pp</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="statistics-footnotes"><p>Interactive preview · Sample data</p><p><i data-lucide="lock-keyhole" aria-hidden="true"></i>Stored locally. Pause or clear it anytime.</p><p><i data-lucide="file-down" aria-hidden="true"></i>Export your readings as CSV.</p></div>
     </section>
 
     <section class="split-section" id="local">
@@ -392,6 +446,7 @@
     <span class="footer-credit">© 2026 <span translate="no">Limit Bar</span> by <a href="https://artsvit.com" target="_blank" rel="noopener noreferrer" translate="no">Artem Svitelskyi</a></span>
   </footer>
 
+  <script src="statistics.js?v=20261016-history" defer></script>
   <script src="https://unpkg.com/lucide@0.542.0/dist/umd/lucide.min.js"></script>
   <script>
     lucide.createIcons({
