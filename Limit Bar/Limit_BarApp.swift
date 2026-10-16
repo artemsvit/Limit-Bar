@@ -40,6 +40,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             UsageNotificationCenter.requestAuthorizationIfNeeded()
         }
         statusController = StatusBarController(store: store)
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--preview-recovery") {
+            let preview = LimitStore(isPreview: true)
+            preview.services[0].state = .failed
+            preview.services[0].errorMessage = "Not logged in. Sign in to Codex."
+            SettingsWindowPresenter.shared.open(store: preview)
+        } else if ProcessInfo.processInfo.arguments.contains("--show-settings") {
+            SettingsWindowPresenter.shared.open(store: store)
+        }
+        if ProcessInfo.processInfo.arguments.contains("--show-history") {
+            UsageHistoryWindowPresenter.shared.open()
+        }
+        #endif
     }
 
     nonisolated func userNotificationCenter(
@@ -511,7 +524,6 @@ final class SettingsWindowPresenter {
 
     private let windowWidth: CGFloat = 580
     private var window: NSWindow?
-    private let windowDelegate = TopAnchoredWindowDelegate()
 
     func open(store: LimitStore) {
         if let window {
@@ -524,13 +536,10 @@ final class SettingsWindowPresenter {
             rootView: SettingsWindowView()
                 .environmentObject(store)
         )
-        // Let the window track the SwiftUI content height instead of padding a fixed
-        // frame, so no empty band is left below the footer.
-        hostingView.sizingOptions = [.preferredContentSize]
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: 1),
-            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
@@ -538,58 +547,12 @@ final class SettingsWindowPresenter {
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.contentView = hostingView
-        window.delegate = windowDelegate
 
-        // NSHostingView.fittingSize reads 0 until the view is actually part of a
-        // window - measured directly, forcing layoutIfNeeded() here did not fix it,
-        // SwiftUI resolves it on a later run-loop turn regardless. So this opens at
-        // a 1pt placeholder and lets `sizingOptions` grow it once real layout
-        // resolves; the delegate centers the window the first time that resize
-        // arrives, when the height is finally real, instead of centering the
-        // placeholder up front.
+        // Keep the window stable while expanded sections scroll within it.
+        window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         self.window = window
-    }
-}
-
-/// When the notifications accordion opens or closes, AppKit resizes the window from its
-/// bottom-left origin, which makes the title bar jump. Pin the top edge instead.
-@MainActor
-private final class TopAnchoredWindowDelegate: NSObject, NSWindowDelegate {
-    private var topEdge: CGFloat?
-    private var isAdjusting = false
-
-    func windowDidMove(_ notification: Notification) {
-        guard !isAdjusting, let window = notification.object as? NSWindow else { return }
-        topEdge = window.frame.maxY
-    }
-
-    func windowDidResize(_ notification: Notification) {
-        guard !isAdjusting, let window = notification.object as? NSWindow else { return }
-
-        // A nil topEdge means this is the very first resize this delegate has
-        // seen: SwiftUI's hosting view reporting its real content height for the
-        // first time, growing the window from the 1pt placeholder `open()`
-        // created it at. That is the first point the true size is known, so
-        // center it for real now, then remember the result as the anchor for
-        // later resizes (the notifications accordion opening or closing).
-        guard let topEdge else {
-            isAdjusting = true
-            window.center()
-            isAdjusting = false
-            self.topEdge = window.frame.maxY
-            return
-        }
-
-        let drift = window.frame.maxY - topEdge
-        guard abs(drift) > 0.5 else { return }
-
-        isAdjusting = true
-        var frame = window.frame
-        frame.origin.y = topEdge - frame.height
-        window.setFrame(frame, display: true)
-        isAdjusting = false
     }
 }

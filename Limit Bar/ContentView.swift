@@ -122,23 +122,6 @@ enum LimitService: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-struct NotificationPreferences: Codable, Equatable {
-    var isEnabled: Bool
-    var thresholds: [Int]
-
-    static let `default` = NotificationPreferences(isEnabled: false, thresholds: [50, 25, 10])
-
-    var normalizedThresholds: [Int] {
-        thresholds
-            .map { min(max($0, 1), 99) }
-            .sorted(by: >)
-            .reduce(into: [Int]()) { partialResult, value in
-                if !partialResult.contains(value) {
-                    partialResult.append(value)
-                }
-            }
-    }
-}
 
 enum MenuBarDisplayMode: String, Codable, CaseIterable {
     case bars
@@ -320,14 +303,13 @@ enum UsageNotificationCenter {
     private static let rearmMargin = 5
 
     static func requestAuthorizationIfNeeded() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
+        NotificationStatusStore.shared.requestAuthorization()
     }
 
-    static func sendTestNotification() {
-        requestAuthorizationIfNeeded()
-
+    @MainActor
+    static func sendTestNotification(service: LimitService = .codex) {
         let content = UNMutableNotificationContent()
-        content.title = "Codex session limit is running low"
+        content.title = "\(service.shortName) session limit is running low"
         content.body = "24% remaining, resets in 4 hours."
         content.sound = .default
 
@@ -336,7 +318,20 @@ enum UsageNotificationCenter {
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request)
+        Task {
+            let center = UNUserNotificationCenter.current()
+            do {
+                guard try await center.requestAuthorization(options: [.alert, .badge, .sound]) else {
+                    await NotificationStatusStore.shared.refresh()
+                    return
+                }
+                try await center.add(request)
+                NotificationStatusStore.shared.reportDelivery(error: nil, isTest: true)
+            } catch {
+                NotificationStatusStore.shared.reportDelivery(error: error, isTest: true)
+            }
+            await NotificationStatusStore.shared.refresh()
+        }
     }
 
     /// v1 remembered alerts by (threshold, reset timestamp). Claude's weekly reset was
@@ -368,11 +363,49 @@ enum UsageNotificationCenter {
         current: ServiceLimit,
         preferences: NotificationPreferences
     ) {
+        evaluateRecovery(service: service, current: current, preferences: preferences)
         guard preferences.isEnabled else { return }
-        requestAuthorizationIfNeeded()
-
         evaluate(kind: "Current", service: service, current: current.current, thresholds: preferences.normalizedThresholds)
         evaluate(kind: "Weekly", service: service, current: current.weekly, thresholds: preferences.normalizedThresholds)
+    }
+
+    @MainActor
+    private static func evaluateRecovery(service: LimitService, current: ServiceLimit, preferences: NotificationPreferences) {
+        let key = "limit-bar.recovery.\(service.rawValue).v1"
+        guard preferences.isEnabled, preferences.notifyOnRecovery ?? true else {
+            UserDefaults.standard.removeObject(forKey: key)
+            return
+        }
+        let previousData = UserDefaults.standard.data(forKey: key)
+        var state = previousData
+            .flatMap { try? JSONDecoder().decode(UsageRecoveryState.self, from: $0) } ?? UsageRecoveryState()
+        let recovered = state.observe(session: current.current?.remainingPercent, weekly: current.weekly?.remainingPercent)
+        guard let updatedData = try? JSONEncoder().encode(state) else { return }
+        UserDefaults.standard.set(updatedData, forKey: key)
+        guard recovered else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "\(service.shortName) usage is available again"
+        content.body = [("Session", current.current), ("Weekly", current.weekly)].compactMap { name, balance in
+            balance.map { "\(name): \($0.remainingPercent)% remaining" }
+        }.joined(separator: ". ") + "."
+        content.sound = .default
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: [
+            "limit-bar.usage.\(levelKey(service: service, kind: "Current"))",
+            "limit-bar.usage.\(levelKey(service: service, kind: "Weekly"))"
+        ])
+        center.add(UNNotificationRequest(identifier: "limit-bar.recovered.\(service.rawValue)", content: content, trigger: nil)) { error in
+            Task { @MainActor in
+                NotificationStatusStore.shared.reportDelivery(error: error)
+                if error != nil, UserDefaults.standard.data(forKey: key) == updatedData {
+                    UserDefaults.standard.set(previousData, forKey: key)
+                }
+            }
+        }
+    }
+
+    static func clearRecoveryState(for service: LimitService) {
+        UserDefaults.standard.removeObject(forKey: "limit-bar.recovery.\(service.rawValue).v1")
     }
 
     /// One alert per threshold per window, tracked by value alone.
@@ -433,7 +466,12 @@ enum UsageNotificationCenter {
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request) { error in
+            Task { @MainActor in NotificationStatusStore.shared.reportDelivery(error: error) }
+            if let error {
+                NSLog("Usage notification failed: %@", error.localizedDescription)
+            }
+        }
     }
 
     /// "Low" undersells 10% left and oversells 50%, so the wording follows the
@@ -470,11 +508,13 @@ final class LimitStore: ObservableObject {
     @Published var services: [ServiceLimit] {
         didSet {
             save()
-            refreshCoordinator.reschedule()
+            if !isPreview { refreshCoordinator.reschedule() }
         }
     }
 
     private let storageKey = "limit-bar.services.v4"
+    private let isPreview: Bool
+    private var attemptIDs: [LimitService: UUID] = [:]
     /// One task per provider, so a slow CLI cannot stack up across triggers.
     private var inFlight: [LimitService: Task<Void, Never>] = [:] {
         didSet {
@@ -498,16 +538,23 @@ final class LimitStore: ObservableObject {
         manualRefreshes.contains(service)
     }
 
-    init() {
-        if let data = UserDefaults.standard.data(forKey: storageKey),
+    init(isPreview: Bool = false) {
+        self.isPreview = isPreview
+        if !isPreview, let data = UserDefaults.standard.data(forKey: storageKey),
            let decoded = try? JSONDecoder().decode([ServiceLimit].self, from: data) {
             services = LimitService.allCases.map { service in
-                decoded.first(where: { $0.id == service }) ?? ServiceLimit.placeholder(for: service)
+                var saved = decoded.first(where: { $0.id == service }) ?? ServiceLimit.placeholder(for: service)
+                if saved.isConnecting {
+                    saved.state = .failed
+                    saved.errorMessage = "The previous connection was interrupted. Reconnect to try again."
+                }
+                return saved
             }
         } else {
             services = LimitService.allCases.map(ServiceLimit.placeholder)
         }
 
+        guard !isPreview else { return }
         UsageNotificationCenter.migrateLegacyState(
             services: services,
             preferences: NotificationPreferencesStore.shared.preferences
@@ -553,24 +600,30 @@ final class LimitStore: ObservableObject {
             setState(.connecting, for: service, error: nil)
         }
 
+        let attemptID = UUID()
+        attemptIDs[service] = attemptID
         let task = Task { [weak self] in
             defer {
-                self?.inFlight[service] = nil
-                self?.manualRefreshes.remove(service)
+                if self?.attemptIDs[service] == attemptID {
+                    self?.inFlight[service] = nil
+                    self?.attemptIDs[service] = nil
+                    self?.manualRefreshes.remove(service)
+                }
             }
 
             do {
                 let snapshot = try await ProviderConnector.fetch(service)
+                guard !Task.isCancelled else { return }
                 self?.apply(snapshot, to: service)
             } catch {
-                guard let self else { return }
+                guard !Task.isCancelled, let self else { return }
 
                 if showLoading {
                     self.setState(.failed, for: service, error: error.localizedDescription)
                 } else {
                     // A quiet background refresh must not blank a working row, but the
                     // stale values it leaves behind have to be marked as such.
-                    self.markAttemptFailed(for: service)
+                    self.markAttemptFailed(for: service, error: error.localizedDescription)
                 }
 
                 if presentErrors {
@@ -627,18 +680,37 @@ final class LimitStore: ObservableObject {
         }
     }
 
-    private func markAttemptFailed(for service: LimitService) {
+    private func markAttemptFailed(for service: LimitService, error: String) {
         guard let index = services.firstIndex(where: { $0.id == service }) else { return }
         services[index].lastAttemptAt = Date()
         services[index].lastAttemptFailed = true
+        services[index].errorMessage = error
+    }
+
+    func reconnect(_ service: LimitService) {
+        manualRefreshes.insert(service)
+        let hasData = services.first { $0.id == service }?.isConnected ?? false
+        connect(service, showLoading: !hasData, presentErrors: false)
     }
 
     func resetSetup() {
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
+        attemptIDs.removeAll()
+        manualRefreshes.removeAll()
+        if !isPreview {
+            for service in LimitService.allCases { UsageNotificationCenter.clearRecoveryState(for: service) }
+        }
         services = LimitService.allCases.map(ServiceLimit.placeholder)
     }
 
     func disconnect(_ service: LimitService) {
         guard let index = services.firstIndex(where: { $0.id == service }) else { return }
+        inFlight[service]?.cancel()
+        inFlight[service] = nil
+        attemptIDs[service] = nil
+        manualRefreshes.remove(service)
+        if !isPreview { UsageNotificationCenter.clearRecoveryState(for: service) }
         services[index] = ServiceLimit.placeholder(for: service)
     }
 
@@ -650,6 +722,9 @@ final class LimitStore: ObservableObject {
 
     private func apply(_ snapshot: ProviderSnapshot, to service: LimitService) {
         guard let index = services.firstIndex(where: { $0.id == service }) else { return }
+        if !isPreview, services[index].accountEmail != snapshot.accountEmail {
+            UsageNotificationCenter.clearRecoveryState(for: service)
+        }
         services[index].state = .connected
         services[index].current = snapshot.current
         services[index].weekly = snapshot.weekly
@@ -660,6 +735,8 @@ final class LimitStore: ObservableObject {
         services[index].lastAttemptAt = Date()
         services[index].lastAttemptFailed = false
         services[index].errorMessage = nil
+        guard !isPreview else { return }
+        UsageHistoryStore.shared.record(services[index])
         UsageNotificationCenter.notifyIfNeeded(
             service: service,
             current: services[index],
@@ -681,7 +758,7 @@ final class LimitStore: ObservableObject {
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(services) else { return }
+        guard !isPreview, let data = try? JSONEncoder().encode(services) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
     }
 }
@@ -2120,7 +2197,7 @@ struct ConnectServiceRow: View {
             } else if service.isConnected {
                 ServiceActionPill(service: service.id, isConnected: true, compact: false)
             } else {
-                ServiceActionPill(service: service.id, isConnected: false, compact: false, disconnectedTitle: service.state == .failed ? "Retry" : "Connect")
+                ServiceActionPill(service: service.id, isConnected: false, compact: false, disconnectedTitle: service.state == .failed ? "Reconnect" : "Connect")
             }
         }
         .padding(.horizontal, 14)
@@ -2166,6 +2243,8 @@ struct ServiceActionPill: View {
         Button {
             if isConnected {
                 store.disconnect(service)
+            } else if store.services.first(where: { $0.id == service })?.state == .failed {
+                store.reconnect(service)
             } else {
                 store.connect(service)
             }
@@ -2726,6 +2805,10 @@ struct MenuSetupView: View {
 
                 Spacer()
 
+                MenuHeaderIconButton(systemName: "chart.xyaxis.line", helpText: "Usage history") {
+                    UsageHistoryWindowPresenter.shared.open()
+                }
+
                 MenuHeaderIconButton(systemName: "gearshape", helpText: "Open settings") {
                     SettingsWindowPresenter.shared.open(store: store)
                 }
@@ -2738,6 +2821,7 @@ struct MenuSetupView: View {
             VStack(spacing: 10) {
                 ForEach(store.activeServices) { service in
                     MenuConnectRow(service: service)
+                    if service.state == .failed { ProviderRecoveryView(service: service) }
                 }
             }
 
@@ -2770,6 +2854,10 @@ struct MenuUsageView: View {
                     MenuHeaderIconButton(systemName: "arrow.clockwise", helpText: "Refresh limits") {
                         store.refreshConnected()
                     }
+                }
+
+                MenuHeaderIconButton(systemName: "chart.xyaxis.line", helpText: "Usage history") {
+                    UsageHistoryWindowPresenter.shared.open()
                 }
 
                 MenuHeaderIconButton(systemName: "gearshape", helpText: "Open settings") {
@@ -2813,11 +2901,18 @@ struct MenuUsageView: View {
 
                     CompactBalanceRow(kind: "Current", balance: service.current, isRefreshing: store.isManuallyRefreshing(service.id))
                     CompactBalanceRow(kind: "Weekly", balance: service.weekly, isRefreshing: store.isManuallyRefreshing(service.id))
+                    if service.isShowingStaleData { ProviderRecoveryView(service: service) }
                 }
                 .padding(10)
                 .settingsCardSurface(cornerRadius: 14, fill: SettingsPalette.surfaceRaised)
             }
 
+            ForEach(store.activeServices.filter { $0.state == .failed || $0.isConnecting }) { service in
+                VStack(alignment: .leading, spacing: 8) {
+                    MenuConnectRow(service: service, compact: true)
+                    if service.state == .failed { ProviderRecoveryView(service: service) }
+                }
+            }
         }
     }
 
@@ -2879,7 +2974,7 @@ struct MenuConnectRow: View {
             } else if service.isConnected {
                 ServiceActionPill(service: service.id, isConnected: true, compact: true)
             } else {
-                ServiceActionPill(service: service.id, isConnected: false, compact: true, disconnectedTitle: service.state == .failed ? "Retry" : "Connect")
+                ServiceActionPill(service: service.id, isConnected: false, compact: true, disconnectedTitle: service.state == .failed ? "Reconnect" : "Connect")
             }
         }
         .padding(.horizontal, compact ? 10 : 12)
@@ -2965,26 +3060,29 @@ struct SettingsWindowView: View {
     @State private var notificationDetailsExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            settingsHeader
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                settingsHeader
 
-            settingsSection("Providers") {
-                providersCard
+                settingsSection("Providers") {
+                    providersCard
+                }
+
+                settingsSection("General") {
+                    appOptionsCard
+                }
+
+                settingsSection("Notifications") {
+                    notificationCard
+                }
+
+                settingsFooter
             }
-
-            settingsSection("General") {
-                appOptionsCard
-            }
-
-            settingsSection("Notifications") {
-                notificationCard
-            }
-
-            settingsFooter
+            .padding(22)
+            .frame(width: 580, alignment: .topLeading)
         }
-        .padding(22)
-        .frame(width: 580, alignment: .topLeading)
-        .fixedSize(horizontal: false, vertical: true)
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(width: 580, height: 680)
         .background(AppSurfaceBackground())
         .onAppear {
             notificationDetailsExpanded = notificationSettings.isEnabled
@@ -3038,6 +3136,10 @@ struct SettingsWindowView: View {
                 }
 
                 ConnectServiceRow(service: service, showsSurface: false)
+                if service.state == .failed || service.isShowingStaleData {
+                    ProviderRecoveryView(service: service)
+                        .padding(.horizontal, 14).padding(.bottom, 12)
+                }
             }
         }
         .settingsCardSurface(cornerRadius: 15)
@@ -3089,6 +3191,13 @@ struct SettingsWindowView: View {
                 .frame(height: 1)
 
             automaticUpdatesRow
+
+            Divider()
+            HStack {
+                Label("Local usage history", systemImage: "chart.xyaxis.line")
+                Spacer()
+                SettingsPillButton(title: "View history") { UsageHistoryWindowPresenter.shared.open() }
+            }
         }
         .padding(12)
         .settingsCardSurface(cornerRadius: 15)
@@ -3135,7 +3244,7 @@ struct SettingsWindowView: View {
 
             Spacer()
 
-            Toggle("", isOn: automaticUpdateCheckBinding)
+            Toggle("Automatic update checks", isOn: automaticUpdateCheckBinding)
                 .labelsHidden()
                 .toggleStyle(BrandedLoginToggleStyle())
                 .disabled(!appUpdater.isConfigured)
@@ -3166,7 +3275,7 @@ struct SettingsWindowView: View {
 
             Spacer()
 
-            Toggle("", isOn: $startsAtLogin)
+            Toggle("Start at login", isOn: $startsAtLogin)
                 .labelsHidden()
                 .toggleStyle(BrandedLoginToggleStyle())
                 .onChange(of: startsAtLogin) { _, isEnabled in
@@ -3191,7 +3300,7 @@ struct SettingsWindowView: View {
 
             Spacer()
 
-            Toggle("", isOn: menuBarPercentBinding)
+            Toggle("Show current percent", isOn: menuBarPercentBinding)
                 .labelsHidden()
                 .toggleStyle(BrandedLoginToggleStyle())
         }
@@ -3213,10 +3322,12 @@ struct SettingsWindowView: View {
 
                 Spacer()
 
-                Toggle("", isOn: notificationEnabledBinding)
+                Toggle("Usage notifications", isOn: notificationEnabledBinding)
                     .labelsHidden()
                     .toggleStyle(BrandedLoginToggleStyle())
             }
+
+            NotificationStatusView().padding(.top, 12)
 
             AccordionContent(isExpanded: notificationDetailsExpanded) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -3257,6 +3368,17 @@ struct SettingsWindowView: View {
                             .monospacedDigit()
                     }
 
+                    Toggle("Notify when usage is available again", isOn: Binding(
+                        get: { notificationSettings.preferences.notifyOnRecovery ?? true },
+                        set: { enabled in
+                            notificationSettings.preferences.notifyOnRecovery = enabled
+                            for service in LimitService.allCases { UsageNotificationCenter.clearRecoveryState(for: service) }
+                        }
+                    ))
+                    .font(.callout)
+                    Text("After a limit reaches 0%, alert once a refresh confirms at least 5% is available and no observed limit remains depleted.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+
                     Text("Drag a handle or type a value. Recommended: 50%, 25%, and 10%. Applies to current and weekly balances.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -3278,6 +3400,7 @@ struct SettingsWindowView: View {
             get: { notificationSettings.isEnabled },
             set: { isEnabled in
                 notificationSettings.isEnabled = isEnabled
+                for service in LimitService.allCases { UsageNotificationCenter.clearRecoveryState(for: service) }
                 if isEnabled {
                     UsageNotificationCenter.requestAuthorizationIfNeeded()
                 }
@@ -3391,7 +3514,7 @@ struct BrandedLoginToggleStyle: ToggleStyle {
             .animation(.spring(response: 0.25, dampingFraction: 0.82), value: configuration.isOn)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Start at login")
+        .accessibilityLabel { _ in configuration.label }
         .accessibilityValue(configuration.isOn ? "On" : "Off")
     }
 
